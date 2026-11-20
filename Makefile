@@ -1,12 +1,15 @@
 # Local Kind harness for the TrustyAI module and workload operators.
 #
 #   make up OPERATOR_REPO=/path/to/trustyai-service-operator
+#   make up OPERATOR_REPO=/path/to/trustyai-service-operator OPENSHELL=1
 #
 # creates a Kind cluster, builds the workload and module operator images from
 # that checkout, loads them into the cluster, and deploys the module operator
 # pointed at the freshly built workload operator image. The module operator then
 # deploys the workload operator, which deploys EvalHub. The LLM emulator the
 # adapter checks call as their model is deployed and removed by the tests.
+# OPENSHELL=1 also installs the OpenShell gateway and the Agent Sandbox
+# controller it needs; see the README for what that can and cannot prove on Kind.
 
 SHELL := /usr/bin/env bash
 .SHELLFLAGS := -o pipefail -ec
@@ -14,6 +17,7 @@ SHELL := /usr/bin/env bash
 
 KUBECTL ?= kubectl
 KIND ?= kind
+HELM ?= helm
 
 KIND_CLUSTER ?= trustyai
 KIND_CONFIG ?= hack/kind/cluster.yaml
@@ -24,6 +28,21 @@ KUBE_CONTEXT ?= kind-$(KIND_CLUSTER)
 # Set to `podman` or `docker` to force a provider on machines that have both.
 KIND_PROVIDER ?=
 KIND_ENV := $(if $(KIND_PROVIDER),KIND_EXPERIMENTAL_PROVIDER=$(KIND_PROVIDER))
+
+# The optional OpenShell gateway. `make up OPENSHELL=1` installs it after the
+# operators; `make openshell` installs it on a cluster that is already up.
+# Kind's default CNI accepts the gateway's NetworkPolicies but does not enforce
+# them, so this exercises the gateway's API and sandbox lifecycle, not the
+# isolation it provides; see the README before recording isolation results.
+OPENSHELL ?=
+OPENSHELL_NAMESPACE ?= openshell
+OPENSHELL_RELEASE ?= openshell
+OPENSHELL_CHART ?= oci://ghcr.io/nvidia/openshell/helm-chart
+# OpenShell 0.1.4, the version the sandbox spike targets. Override deliberately.
+OPENSHELL_CHART_VERSION ?= 0.1.4
+# Local Kind has no OIDC provider, so the gateway would reject every client.
+OPENSHELL_ALLOW_UNAUTHENTICATED ?= true
+AGENT_SANDBOX_MANIFEST ?= https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/sandbox.yaml
 
 NAMESPACE ?= system
 
@@ -83,7 +102,9 @@ ADAPTERS_REPORT_FILE ?= reports/adapters.html
 export KIND KUBECTL KIND_CLUSTER KUBE_CONTEXT NAMESPACE OPERATOR_REPO TAG \
 	WORKLOAD_IMG MODULE_IMG EVALHUB_IMG TRUSTYAI_SERVICE_IMG ENGINE TIMEOUT \
 	REPORT_FILE ADAPTERS_MARKER ADAPTERS_REPORT_FILE EMULATOR_IMG EMULATOR_NAMESPACE EMULATOR_TOKEN \
-	MODEL_URL MODEL_KEY MODEL_NAME KEEP_RESOURCES
+	MODEL_URL MODEL_KEY MODEL_NAME KEEP_RESOURCES HELM OPENSHELL OPENSHELL_NAMESPACE \
+	OPENSHELL_RELEASE OPENSHELL_CHART OPENSHELL_CHART_VERSION OPENSHELL_ALLOW_UNAUTHENTICATED \
+	AGENT_SANDBOX_MANIFEST
 
 .PHONY: help
 help: ## Display this help.
@@ -124,8 +145,24 @@ load: ## Load the built images into the Kind cluster.
 deploy: check-operator-repo ## Deploy the module operator, create its module resource, and wait for the workload operator.
 	hack/deploy.sh
 
+.PHONY: openshell
+openshell: cluster ## Install the OpenShell gateway and the Agent Sandbox controller on the Kind cluster.
+	hack/openshell.sh
+
+.PHONY: openshell-status
+openshell-status: ## Show the OpenShell gateway, its Agent Sandbox controller, and their pods.
+	$(KUBECTL) --context $(KUBE_CONTEXT) get deployment,pods -A -l app=agent-sandbox-controller --ignore-not-found
+	$(KUBECTL) --context $(KUBE_CONTEXT) get statefulset,service,pods -A \
+		-l app.kubernetes.io/name=openshell --ignore-not-found
+
+.PHONY: openshell-uninstall
+openshell-uninstall: ## Remove the OpenShell gateway release (leaves Agent Sandbox and the namespace).
+	hack/openshell.sh --uninstall
+
+OPENSHELL_TARGET = $(if $(filter 1,$(OPENSHELL)),openshell)
+
 .PHONY: up
-up: check-operator-repo cluster images load deploy ## Create the cluster, build, load, deploy, and wait for both operators.
+up: check-operator-repo cluster images load deploy $(OPENSHELL_TARGET) ## Create the cluster, build, load, deploy, and wait for both operators; OPENSHELL=1 also installs the gateway.
 
 .PHONY: down
 down: cluster-delete ## Delete the Kind cluster.

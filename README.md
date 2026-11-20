@@ -29,6 +29,7 @@ operand lifecycle is under test.
 - `uv`, which resolves the pinned Python 3.11+ dependencies from `uv.lock` for
   `make deploy`, `make test`, `make test-evalhub-adapters`, `make lint` and
   `make fmt`
+- `helm` 3.x, only for `make openshell` and `make up OPENSHELL=1`
 - `python3` with the [`cryptography`][cryptography] package, which `make deploy`
   runs `hack/gen-certs.py` with to create the TLS secrets Kind does not issue
 - a `trustyai-service-operator` checkout, passed as `OPERATOR_REPO`
@@ -54,6 +55,11 @@ make deploy     # deploy the module operator, pointing it at the built images
 
 `up`, `images` and `deploy` require `OPERATOR_REPO` and stop with a pointer to
 the flag when it is missing or does not look like an operator checkout.
+
+Add `OPENSHELL=1` to `make up` to install the [OpenShell
+gateway](#openshell-gateway-optional) after the operators, or run `make openshell`
+directly (it creates the cluster if needed). It is off by default so the existing
+workflow does not need Helm or the gateway's cluster-scoped prerequisite.
 
 Tear the cluster down with `make down`; `make clean` also deletes the images
 the harness built and the HTML reports (`reports/`), without touching the
@@ -84,6 +90,81 @@ cluster.
 That is where the harness stops: both operators run, with the images this run asked
 for, and nothing is reconciled on top of them. `make status` right after `make up`
 shows the two operators and no operands.
+
+### OpenShell gateway (optional)
+
+`make openshell` puts the [OpenShell][openshell] gateway on the Kind cluster,
+creating the cluster if it is not up; `make up OPERATOR_REPO=... OPENSHELL=1`
+installs it after the operators. It is opt-in because the default Kind CNI cannot
+enforce the isolation the gateway is for, not because it cannot run: see [What
+Kind cannot prove](#what-kind-cannot-prove) before recording an isolation result
+from it.
+
+It installs two things, both idempotently:
+
+1. the [Agent Sandbox][agent-sandbox] controller and its `Sandboxes` CRD from
+   `AGENT_SANDBOX_MANIFEST`, because the gateway's Kubernetes driver creates a
+   `Sandbox` and lets that controller create the workload Pod;
+2. the OpenShell Helm chart from GHCR, `OPENSHELL_CHART` at
+   `OPENSHELL_CHART_VERSION` (0.1.4, the version the sandbox work targets), into
+   `OPENSHELL_NAMESPACE`, with `workspaceMode: shared`, the release namespace as
+   the sandbox namespace, and the default StatefulSet workload. The gateway keeps
+   its SQLite database on a PVC and each sandbox gets a workspace PVC, both on the
+   cluster's default StorageClass.
+
+```sh
+make openshell
+make openshell-status
+kubectl --context kind-trustyai -n openshell port-forward svc/openshell 8080:8080
+make openshell-uninstall   # Helm release only; the namespace and PVCs remain
+```
+
+A local Kind cluster has no OIDC provider or user directory, so the gateway is
+installed with `server.auth.allowUnauthenticatedUsers=true`
+(`OPENSHELL_ALLOW_UNAUTHENTICATED=true`). Set it to `false` when the test is about
+the gateway's authentication rather than what runs behind it. `make down`
+removes the gateway, the Agent Sandbox controller and its CRDs with the cluster;
+`make clean` does not, because it only removes the images and reports.
+
+#### What Kind cannot prove
+
+- **NetworkPolicy is not enforced.** Kind's default CNI, kindnet, accepts
+  `NetworkPolicy` objects but does not enforce them. OpenShell's prerequisites
+  require a CNI that enforces ingress and egress policy in every sandbox
+  namespace; without one, sandbox workloads can reach the network directly and
+  bypass the supervisor. The gateway and its API run, but any deny/allow or
+  cross-tenant isolation result is meaningless. Upstream's own Kind e2e replaces
+  kindnet with Calico before it asserts policy; this harness does not, and warns
+  when it finds no Calico or Cilium pods.
+- **No SCC, PSA, SELinux, OVN or audit.** Kind does not model OpenShift's
+  namespace UID allocation, MCS/SELinux labels, OVN network policy or audit log,
+  and the driver falls back to its default sandbox UID instead of the namespace's
+  `openshift.io/sa.scc.uid-range`. A denial Kind cannot produce may exist on
+  OpenShift, and a permissive result here says nothing about the platform.
+  Re-run security-relevant checks on OpenShift.
+- **The sandbox runtime has its own kernel requirements.** OpenShell fails sandbox
+  startup when the node cannot install a nested seccomp user-notification filter
+  or use Landlock; that is why it requires OpenShift 4.19+, whose RHCOS kernel has
+  Landlock (4.16-4.18 do not). A Kind node runs the container host's kernel (the
+  Podman or Docker VM on macOS), so the gateway becoming Ready does not prove a
+  sandbox will start. Exercise one sandbox before relying on sandbox results.
+- **One node and node-local storage.** Kind is a single control-plane node with a
+  `local-path` StorageClass. Sandbox PVCs are node-local and scheduling, HA,
+  eviction and multi-node storage behaviour are not exercised.
+- **Runtime pulls.** The gateway, sandbox and supervisor images come from
+  `ghcr.io/nvidia/openshell`, and the default workload sandbox image is
+  `nvcr.io/nvidia/base/ubuntu:24.04`. They are published for `amd64` and `arm64`,
+  but are pulled when a sandbox starts rather than preloaded, so the first
+  sandbox can spend minutes pulling. A registry that needs credentials needs
+  `sandboxImagePullSecrets`, which this target does not set.
+- **A moving prerequisite.** `AGENT_SANDBOX_MANIFEST` defaults to the latest
+  Agent Sandbox release, as OpenShell's install guide does. Pin it, together with
+  `OPENSHELL_CHART_VERSION`, when a result has to be reproducible. The chart's
+  preflight fails if the Agent Sandbox `Sandboxes` API is not served, and the
+  install needs cluster-admin, which the Kind kubeconfig is.
+
+[openshell]: https://docs.nvidia.com/openshell/latest/kubernetes/
+[agent-sandbox]: https://agent-sandbox.sigs.k8s.io/
 
 ### The module resource and the operands
 
@@ -175,6 +256,14 @@ a marker of your own belongs in `pyproject.toml` next to the others.
 | `KIND_CLUSTER` | `trustyai` | Kind cluster name (context `kind-<name>`) |
 | `KIND_NODE_IMAGE` | Kind's default | Pin a node image, e.g. `kindest/node:v1.29.0` |
 | `KIND_PROVIDER` | auto | Force `podman` or `docker` on hosts that have both |
+| `HELM` | `helm` | Helm binary the OpenShell target runs |
+| `OPENSHELL` | *(empty)* | `1` makes `make up` install the gateway as well |
+| `OPENSHELL_NAMESPACE` | `openshell` | Namespace the gateway and its sandboxes run in |
+| `OPENSHELL_RELEASE` | `openshell` | Helm release name |
+| `OPENSHELL_CHART` | `oci://ghcr.io/nvidia/openshell/helm-chart` | Chart reference |
+| `OPENSHELL_CHART_VERSION` | `0.1.4` | Chart version; its `appVersion` picks the matching gateway images |
+| `OPENSHELL_ALLOW_UNAUTHENTICATED` | `true` | Admit clients without OIDC, since Kind has no identity provider; set `false` for auth tests |
+| `AGENT_SANDBOX_MANIFEST` | latest Agent Sandbox release | Controller and CRD manifest; pin it together with the chart version for reproducible runs |
 | `NAMESPACE` | `system` | Namespace both operators are deployed into |
 | `KUBECTL` | `kubectl` | kubectl the harness and the checks shell out to, including the token the API checks mint |
 | `MODEL_URL` | *(empty)* | OpenAI-compatible base URL the job checks call instead of the emulator; setting it stops the fixtures deploying the emulator |
@@ -238,6 +327,16 @@ documented under [LLM emulator](#llm-emulator).
 - `make logs` tails the module operator; the workload operator has its own
   pods in the same namespace (`-l control-plane=trustyai-service-operator`),
   and EvalHub runs as `-l app=eval-hub`.
+- `make openshell` waits for the gateway pod; a pod stuck in `Pending` is
+  usually storage, not OpenShell. Both the gateway's SQLite volume and each
+  sandbox's workspace volume claim the default StorageClass, so check
+  `kubectl get storageclass` and set `server.dataStorageClass` /
+  `server.workspaceStorageClass` if none is marked default. A Helm failure
+  naming `agentSandbox.preflight` means the `Sandboxes` CRD is not established;
+  `make openshell-status` shows the Agent Sandbox controller.
+- `make openshell-uninstall` removes the Helm release only. The `openshell`
+  namespace, its retained PVCs and the cluster-scoped Agent Sandbox controller
+  and CRDs remain until `make down` deletes the cluster.
 - Every instance is named `evalhub` and reconciles every tenant-labelled
   namespace, including namespaces it did not create, so a `KEEP_RESOURCES` run or
   an interrupted one leaves an instance that keeps writing to later runs'
