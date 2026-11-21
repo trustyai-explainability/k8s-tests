@@ -59,6 +59,7 @@ markers = [
     "module: checks for the TrustyAI module operator and the TrustyAI resource it reconciles",
     "workload: checks for the TrustyAI workload (service) operator",
     "service: checks for the TrustyAIService resource, its operand and the API behind it",
+    "release: the operator releases a check applies to, from --release",
 ]
 addopts = [
     "-ra",

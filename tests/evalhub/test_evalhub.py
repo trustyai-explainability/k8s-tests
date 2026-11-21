@@ -49,6 +49,7 @@ from utilities.evalhub import (
     tenant_config_maps,
 )
 from utilities.kube import read_deployment
+from utilities.release import release
 from utilities.trustyai import WORKLOAD_OPERATOR_DEPLOYMENT, deployment_env, expected_image_from_env
 
 LOGGER = logging.getLogger(__name__)
@@ -218,6 +219,8 @@ def test_evalhub_runs_the_requested_image(
     )
 
 
+@release(min="3.6")
+@pytest.mark.usefixtures("modular_trustyai_architecture")
 def test_evalhub_tenant_namespace_gets_its_config_maps(
     core_client: client.CoreV1Api, evalhub_instance: dict[str, Any], evalhub_tenant_namespace: str
 ) -> None:

@@ -7,6 +7,10 @@ There is no manifest for the module resource: `k8s-tests deploy` applies it thro
 `utilities.stack`, and the `trustyai_module` fixture creates it when a cluster has
 none, then waits for the workload operator the module operator deploys.
 
+The module operator was split out of the operator for 3.6: an rhoai-3.5 checkout
+deploys one operator directly and has no module to reconcile, so these checks apply
+from 3.6 on and are skipped on an older release.
+
 The module operator is deployed here on its own, without a platform operator, so
 the check for the ConfigMaps a platform operator writes (`odh-trustyai-config`
 and `trustyai-dsc-config`) has no subject on this harness and is not made.
@@ -22,6 +26,7 @@ from kubernetes.dynamic import DynamicClient
 
 from utilities.kube import assert_deployment_healthy, read_deployment
 from utilities.kube import container_images as deployment_images
+from utilities.release import release
 from utilities.trustyai import (
     MODULE_CRD_NAME,
     MODULE_IMAGE_VAR,
@@ -39,6 +44,7 @@ LOGGER = logging.getLogger(__name__)
 
 pytestmark = [
     pytest.mark.module,
+    release(min="3.6"),
     pytest.mark.usefixtures("modular_trustyai_architecture", "trustyai_module"),
 ]
 

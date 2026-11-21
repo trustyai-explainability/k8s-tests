@@ -90,3 +90,189 @@ def test_deploying_the_registry_record_applies_it(tmp_path, monkeypatch):
     deploy.registry_deploy(Settings(images_env_file=str(path)))
     assert deployed[0].workload_img == "localhost:5005/trustyai-service-operator:dev"
     assert deployed[0].evalhub_img == "localhost:5005/evalhub/evalhub:dev"
+
+
+def test_a_forced_reapply_reports_what_it_took_over(tmp_path, monkeypatch):
+    """A pre-module checkout's aggregated ClusterRole is co-owned, so a re-deploy conflicts."""
+    import subprocess
+
+    from harness import deploy as deploy_module
+
+    calls: list[list[str]] = []
+
+    def kube_result(settings, *args, **kwargs):
+        argv = [str(argument) for argument in args]
+        calls.append(argv)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(
+                argv, 1, 'Apply failed with 1 conflict: conflict with "clusterrole-aggregation-controller"', ""
+            )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(deploy_module, "kube_result", kube_result)
+    deploy_module.apply_overlay(Settings(), tmp_path)
+    assert len(calls) == 2
+    assert "--force-conflicts" not in calls[0]
+    assert "--force-conflicts" in calls[1]
+
+
+def test_a_conflict_kubectl_reports_on_stderr_is_forced(tmp_path, monkeypatch):
+    """kubectl puts a server-side apply's field conflict on stderr and exits non-zero."""
+    import subprocess
+
+    from harness import cluster
+    from harness import deploy as deploy_module
+
+    runs: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        argv = [str(part) for part in command]
+        runs.append(argv)
+        if "--force-conflicts" in argv:
+            return subprocess.CompletedProcess(argv, 0, "clusterrole/x serverside-applied", "")
+        return subprocess.CompletedProcess(
+            argv,
+            1,
+            "",
+            'Apply failed with 1 conflict: conflict with "clusterrole-aggregation-controller": .rules',
+        )
+
+    monkeypatch.setattr(cluster, "run", fake_run)
+    deploy_module.apply_overlay(Settings(), tmp_path)
+    assert len(runs) == 2
+    assert "--force-conflicts" not in runs[0]
+    assert "--force-conflicts" in runs[1]
+
+
+def test_a_clean_apply_is_not_forced(tmp_path, monkeypatch):
+    import subprocess
+
+    from harness import deploy as deploy_module
+
+    calls: list[list[str]] = []
+
+    def kube_result(settings, *args, **kwargs):
+        calls.append([str(argument) for argument in args])
+        return subprocess.CompletedProcess(calls[-1], 0, "applied", "")
+
+    monkeypatch.setattr(deploy_module, "kube_result", kube_result)
+    deploy_module.apply_overlay(Settings(), tmp_path)
+    assert len(calls) == 1
+
+
+def test_an_apply_that_fails_without_a_conflict_stops_the_run(tmp_path, monkeypatch):
+    """A non-zero apply that is not a recoverable conflict is a failure, not a clean apply."""
+    import subprocess
+
+    from harness import deploy as deploy_module
+
+    calls: list[list[str]] = []
+
+    def kube_result(settings, *args, **kwargs):
+        calls.append([str(argument) for argument in args])
+        return subprocess.CompletedProcess(calls[-1], 1, "", "error: clusterroles is forbidden")
+
+    monkeypatch.setattr(deploy_module, "kube_result", kube_result)
+    with pytest.raises(HarnessError, match="exit status 1"):
+        deploy_module.apply_overlay(Settings(), tmp_path)
+    assert len(calls) == 1
+
+
+def test_a_forced_reapply_that_fails_for_another_reason_stops_the_run(tmp_path, monkeypatch):
+    """Forcing the conflict away recovers it only when the retry itself succeeds."""
+    import subprocess
+
+    from harness import deploy as deploy_module
+
+    calls: list[list[str]] = []
+
+    def kube_result(settings, *args, **kwargs):
+        argv = [str(argument) for argument in args]
+        calls.append(argv)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(argv, 1, "", 'Apply failed with 1 conflict: conflict with "x": .rules')
+        return subprocess.CompletedProcess(argv, 1, "", "error: the server does not allow access to the resource")
+
+    monkeypatch.setattr(deploy_module, "kube_result", kube_result)
+    with pytest.raises(HarnessError, match="--force-conflicts failed with exit status 1"):
+        deploy_module.apply_overlay(Settings(), tmp_path)
+    assert len(calls) == 2
+
+
+def test_every_applied_crd_is_waited_for(tmp_path, monkeypatch):
+    """The Prometheus CRD is a stand-in too, and its CR is applied after this step."""
+    from pathlib import Path
+
+    from harness import arch
+    from harness import deploy as deploy_module
+
+    crds = tmp_path / "tests" / "crds"
+    crds.mkdir(parents=True)
+    entries = deploy_module.EXTERNAL_CRDS + deploy_module.MODULE_CRDS
+    for filename, _ in entries:
+        (crds / filename).write_text("kind: CustomResourceDefinition\n")
+
+    commands: list[list[str]] = []
+    monkeypatch.setattr(deploy_module, "operator_repo", lambda settings: tmp_path)
+    monkeypatch.setattr(deploy_module, "kube", lambda settings, *args, **kwargs: commands.append(list(args)) or "")
+
+    deploy_module.apply_external_crds(Settings(operator_arch=arch.ARCH_MODULAR))
+
+    applied = [Path(str(arg)).name for command in commands for arg in command if str(arg).endswith(".yaml")]
+    assert sorted(applied) == sorted(filename for filename, _ in entries)
+    waited = [command[-2] for command in commands if command[0] == "wait"]
+    assert sorted(waited) == sorted(f"crd/{name}" for _, name in entries)
+
+
+def test_the_single_layout_points_the_conversion_webhooks(monkeypatch, tmp_path):
+    """The webhook CA is what `utilities.stack` does on the modular layout."""
+    from harness import arch
+    from harness import deploy as deploy_module
+
+    order: list[str] = []
+    monkeypatch.setattr(arch, "require_operator_repo", lambda settings: tmp_path)
+    monkeypatch.setattr(arch, "operator_arch", lambda settings: arch.ARCH_SINGLE)
+    monkeypatch.setattr(deploy_module, "keep_used_images", lambda settings: None)
+    monkeypatch.setattr(deploy_module, "ensure_namespace", lambda settings: order.append("namespace"))
+    monkeypatch.setattr(deploy_module, "apply_external_crds", lambda settings: order.append("crds"))
+    monkeypatch.setattr(deploy_module, "deploy_single", lambda settings, path: order.append("single"))
+    monkeypatch.setattr(deploy_module, "point_conversion_webhooks", lambda settings: order.append("webhooks"))
+    monkeypatch.setattr(deploy_module, "bring_up", lambda settings: order.append("bring-up"))
+    monkeypatch.setattr(deploy_module, "stamp_record", lambda settings, kept: None)
+
+    deploy_module.deploy(Settings(), next_step=False)
+    assert order == ["namespace", "crds", "single", "webhooks"]
+
+
+def test_the_single_layout_hands_over_every_operand_image_it_was_given():
+    """The keys are the operator's own params.env names, which the ConfigMap patch sets."""
+    images = deploy.operand_images(
+        Settings(
+            evalhub_img="quay.io/opendatahub/odh-eval-hub:odh-3.5",
+            lmes_img="quay.io/opendatahub/ta-lmes-job:odh-3.5",
+            kube_rbac_proxy_img="quay.io/opendatahub/odh-kube-rbac-proxy:odh-stable",
+            trustyai_service_img="quay.io/trustyai/trustyai-service:latest",
+        )
+    )
+    assert images == {
+        "trustyaiServiceImage": "quay.io/trustyai/trustyai-service:latest",
+        "evalHubImage": "quay.io/opendatahub/odh-eval-hub:odh-3.5",
+        "kube-rbac-proxy": "quay.io/opendatahub/odh-kube-rbac-proxy:odh-stable",
+        "lmes-pod-image": "quay.io/opendatahub/ta-lmes-job:odh-3.5",
+    }
+    assert deploy.operand_images(Settings(evalhub_img="", lmes_img="")) == {
+        "trustyaiServiceImage": "quay.io/trustyai/trustyai-service:latest"
+    }
+
+
+def test_a_pre_module_run_says_what_the_operator_pins_are():
+    """The 3.5 RBAC and job contract want that release's own EvalHub images, not `latest`."""
+    hint = deploy.warn_on_moving_pins(Settings(evalhub_img="quay.io/opendatahub/odh-eval-hub:odh-3.5"))
+    assert hint.startswith("--lmes-img left at")
+    assert "odh-eval-hub:odh-3.5" in hint and "ta-lmes-job:odh-3.5-ga" in hint
+
+    both = Settings(
+        evalhub_img="quay.io/opendatahub/odh-eval-hub:odh-3.5",
+        lmes_img="quay.io/opendatahub/ta-lmes-job:odh-3.5-ga",
+    )
+    assert deploy.warn_on_moving_pins(both) == ""

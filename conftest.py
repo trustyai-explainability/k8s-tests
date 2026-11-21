@@ -20,6 +20,10 @@ from kubernetes.client.exceptions import ApiException
 from kubernetes.dynamic import DynamicClient
 
 from utilities.kube import KEEP_RESOURCES_VAR, context_from_env, keep_resources, load_clients, namespace_from_env
+from utilities.release import RELEASE_MARKER, RELEASE_OPTION, RELEASE_VAR, declared_release
+from utilities.release import applies as release_applies
+from utilities.release import describe as describe_release
+from utilities.release import parse as parse_release
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,12 +41,33 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="leave the namespaces, the LLM emulator and the job resources on the cluster for inspection",
     )
+    parser.addoption(
+        RELEASE_OPTION,
+        action="store",
+        default=None,
+        metavar="RELEASE",
+        help=(
+            "RHOAI/ODH release the operator under test is from, for example 3.5 or 3.6; "
+            f"checks whose {RELEASE_MARKER} range excludes it are skipped (defaults to ${RELEASE_VAR})"
+        ),
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
     """`--keep-resources` and KEEP_RESOURCES=1 do the same thing, so the fixtures check one place."""
     if config.getoption("keep_resources"):
         os.environ[KEEP_RESOURCES_VAR] = "1"
+    # The flag and the environment variable are one declaration: the harness exports
+    # OPERATOR_RELEASE, and the utilities read it from there.
+    declared = config.getoption("release")
+    if declared:
+        # Fail the run, not one check, when the declaration cannot be compared to a
+        # range: every gate would otherwise silently disagree with it.
+        try:
+            parse_release(str(declared))
+        except ValueError as exc:
+            raise pytest.UsageError(f"{RELEASE_OPTION}: {exc}") from exc
+        os.environ[RELEASE_VAR] = str(declared).strip()
     if config.option.htmlpath:
         _install_report_logo(config)
 
@@ -155,6 +180,14 @@ def report_target(clients: tuple[client.CoreV1Api, client.AppsV1Api], kube_conte
         namespace,
         core_client.api_client.configuration.host,
     )
+    declared = declared_release()
+    if declared:
+        LOGGER.info("release: %s; checks declaring a range without it are skipped", declared)
+    else:
+        LOGGER.info(
+            "release: not declared; set OPERATOR_RELEASE (or %s) to gate the checks by release",
+            RELEASE_OPTION,
+        )
     if keep_resources():
         LOGGER.warning(
             "KEEP_RESOURCES is set: teardown will leave the EvalHub instance, its tenant namespace, the "
@@ -211,7 +244,8 @@ def _scope_of(item: pytest.Item) -> str:
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """Order the run by scope so the report groups the tests by component."""
+    """Order the run by scope so the report groups the tests by component, and apply the version gates."""
+    _skip_outside_declared_releases(items)
     order = {scope: index for index, scope in enumerate((*SCOPE_MARKERS, SCOPE_UNMARKED))}
     for item in items:
         _SCOPES[item.nodeid] = _scope_of(item)
@@ -222,6 +256,29 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         if scope not in seen:
             _SCOPE_STARTS.add(item.nodeid)
             seen.add(scope)
+
+
+def _skip_outside_declared_releases(items: list[pytest.Item]) -> None:
+    """Skip the checks whose declared release range excludes the one this run targets.
+
+    Without a declared release nothing is skipped: the run keeps every check and the
+    fixtures skip the ones whose subject the cluster does not have.
+    """
+    run = declared_release()
+    if run is None:
+        return
+    for item in items:
+        mark = item.get_closest_marker(RELEASE_MARKER)
+        if mark is None:
+            continue
+        lower, upper = mark.kwargs.get("min"), mark.kwargs.get("max")
+        try:
+            if release_applies(min=lower, max=upper, run=run):
+                continue
+            requirement = describe_release(min=lower, max=upper)
+        except ValueError as exc:
+            raise pytest.UsageError(f"{item.nodeid}: {exc}") from exc
+        item.add_marker(pytest.mark.skip(reason=f"applies to operator releases {requirement}; this run targets {run}"))
 
 
 def pytest_html_results_table_header(cells: list[str]) -> None:
@@ -269,6 +326,12 @@ def pytest_html_results_summary(
         title = SCOPE_TITLES.get(scope, scope)
         return f"{title} ({', '.join(parts)})"
 
+    declared = declared_release()
+    if declared:
+        prefix.append(
+            f'<p class="col-operator-release">Operator release under test: <code>{declared}</code>; '
+            "checks declaring a different range were skipped.</p>"
+        )
     blocks = [describe(scope) for scope in (*SCOPE_MARKERS, SCOPE_UNMARKED) if counts.get(scope)]
     if blocks:
         prefix.append(f'<p class="col-scope-summary">Grouped by scope: {"; ".join(blocks)}</p>')

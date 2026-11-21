@@ -150,3 +150,19 @@ def test_the_engine_is_chosen_from_the_environment_first(monkeypatch, cluster):
     monkeypatch.setattr(engine, "require_tool", lambda name, hint="": name)
     assert engine.container_engine(Settings(kind_cluster=cluster, engine="podman")) == "podman"
     assert engine.container_engine(Settings(kind_cluster=cluster, kind_provider="docker")) == "docker"
+
+
+def test_the_context_follows_a_cluster_named_later():
+    """The regression: `up --kind-cluster other` waited on the group's default context."""
+    group = Settings.from_params({})
+    assert group.kube_context == "kind-trustyai"
+
+    moved = group.with_updates(kind_cluster="other")
+    assert moved.kube_context == "kind-other"
+
+    assert Settings.from_params({"kind_cluster": "other"}).kube_context == "kind-other"
+
+
+def test_an_explicit_context_survives_a_new_cluster_name():
+    named = Settings.from_params({"kube_context": "my-cluster"}).with_updates(kind_cluster="other")
+    assert named.kube_context == "my-cluster"

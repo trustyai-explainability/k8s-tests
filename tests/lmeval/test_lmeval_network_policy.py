@@ -25,11 +25,15 @@ from kubernetes import client
 
 from utilities import lmeval
 from utilities.kube import keep_resources
+from utilities.release import release
 from utilities.trustyai import crd_exists
 
 LOGGER = logging.getLogger(__name__)
 
 pytestmark = [pytest.mark.lmeval, pytest.mark.usefixtures("trustyai_module")]
+
+# The release whose operator writes the NetworkPolicy that guards an LMEvalJob's Pod.
+POLICY_MIN_VERSION = "3.6"
 
 
 @dataclass(frozen=True)
@@ -87,6 +91,7 @@ def _policy(networking_client: client.NetworkingV1Api, evaluation: Evaluation) -
     return networking_client.read_namespaced_network_policy(name=evaluation.policy_name, namespace=evaluation.namespace)
 
 
+@release(min=POLICY_MIN_VERSION)
 def test_policy_guards_the_execution_pod(networking_client: client.NetworkingV1Api, evaluation: Evaluation) -> None:
     """The operator creates one policy, owned by the job, admitting no ingress and all egress."""
     policy = _policy(networking_client, evaluation)
@@ -107,6 +112,7 @@ def test_policy_guards_the_execution_pod(networking_client: client.NetworkingV1A
     )
 
 
+@release(min=POLICY_MIN_VERSION)
 def test_policy_selects_the_pods_identity(
     networking_client: client.NetworkingV1Api, core_client: client.CoreV1Api, evaluation: Evaluation
 ) -> None:
@@ -137,6 +143,7 @@ def test_policy_selects_the_pods_identity(
 
 
 @pytest.mark.parametrize("label", lmeval.POD_IDENTITY_LABELS)
+@release(min=POLICY_MIN_VERSION)
 def test_operator_restores_a_pod_identity_label(
     core_client: client.CoreV1Api, evaluation: Evaluation, label: str
 ) -> None:
@@ -147,6 +154,7 @@ def test_operator_restores_a_pod_identity_label(
     lmeval.wait_for_label(core_client, evaluation.namespace, evaluation.pod_name, label, expected)
 
 
+@release(min=POLICY_MIN_VERSION)
 def test_operator_repairs_policy_drift(networking_client: client.NetworkingV1Api, evaluation: Evaluation) -> None:
     """Editing the policy's rules is repaired, and annotations it does not own are kept."""
     policy = _policy(networking_client, evaluation)
@@ -165,6 +173,7 @@ def test_operator_repairs_policy_drift(networking_client: client.NetworkingV1Api
     )
 
 
+@release(min=POLICY_MIN_VERSION)
 def test_operator_recreates_a_deleted_policy(networking_client: client.NetworkingV1Api, evaluation: Evaluation) -> None:
     """Deleting the policy brings a new one, selected the same way, not the old one back."""
     deleted = _policy(networking_client, evaluation)
@@ -181,6 +190,7 @@ def test_operator_recreates_a_deleted_policy(networking_client: client.Networkin
     assert len(replacement.spec.egress or []) == 1, replacement.spec.egress
 
 
+@release(min=POLICY_MIN_VERSION)
 def test_retained_completed_job_is_still_repaired(
     custom_api: client.CustomObjectsApi, core_client: client.CoreV1Api, evaluation: Evaluation
 ) -> None:

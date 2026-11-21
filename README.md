@@ -59,7 +59,10 @@ k8s-tests deploy     # deploy the module operator, pointing it at the built imag
 ```
 
 `up`, `images`, `images-all` and `deploy` require `OPERATOR_REPO` and stop with a pointer
-to the flag when it is missing or does not look like an operator checkout.
+to the flag when it is missing or does not look like an operator checkout. `load` reads the
+layout from that checkout to know how many images it loaded, so it takes `OPERATOR_REPO`
+too, or `--operator-arch single|modular` when the checkout is not at hand; with neither it
+stops rather than reading the layout out of the current directory.
 
 Tear the cluster down with `k8s-tests down`. `k8s-tests clean` also deletes the images
 the harness built, the local registry container `images-all` starts, and the HTML
@@ -258,6 +261,8 @@ Every one is a flag and an environment variable; `k8s-tests --help` lists them a
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OPERATOR_REPO` | *(required)* | Checkout the images and manifests come from |
+| `OPERATOR_ARCH` | *(from the checkout)* | `modular` (3.6+, module operator) or `single` (3.5 and earlier); naming a layout the checkout does not have is an error |
+| `OPERATOR_RELEASE` | *(empty)* | RHOAI/ODH release that checkout is from (`3.5`, `3.6`), as `--release`; gates the checks by release, see [Release gating](#release-gating) |
 | `KIND_CLUSTER` | `trustyai` | Kind cluster name (context `kind-<name>`) |
 | `KIND_NODE_IMAGE` | Kind's default | Pin a node image, e.g. `kindest/node:v1.29.0` |
 | `KIND_PROVIDER` | auto | Force `podman` or `docker` on hosts that have both |
@@ -293,6 +298,88 @@ Every one is a flag and an environment variable; `k8s-tests --help` lists them a
 
 The LLM emulator's `EMULATOR_IMG`, `EMULATOR_NAMESPACE` and `EMULATOR_TOKEN` are
 documented under [LLM emulator](#llm-emulator).
+
+### Operator layouts
+
+There are two, and the checkout decides which one a run deploys — `trustyai-operator-module/`
+present means the module operator exists and renders the workload operator; absent means
+one operator, deployed directly (3.5 and earlier).
+
+```console
+$ k8s-tests check-operator-repo --operator-repo /tmp/operator-rhoai-3.5
+==> /tmp/operator-rhoai-3.5 is a trustyai-service-operator checkout
+==> layout: single (the checkout, which has no trustyai-operator-module/ (pre-module))
+```
+
+What differs, and nothing else does:
+
+- `images` builds one operator image instead of two, and `images-all` pushes one instead of
+  two (`MODULE_IMG` is not recorded);
+- `deploy` renders the checkout's own overlay (`config/overlays/rhoai`, then `odh`, then
+  `default`) and patches `trustyai-service-operator-config` with the operator and operand
+  images, instead of deploying the module operator and its module resource;
+- the Prometheus CRD stand-in and the module resource are skipped, since only the module
+  operator needs them.
+
+`--operator-arch` asserts a layout rather than choosing one: on a checkout that lacks it
+the run stops with what is missing, which is how a half-synced checkout gets caught before
+an image is built. `--release` stays the release *under test* — it gates the checks and
+never overrides what the tree can deploy; a run where the two disagree says so.
+
+On a single cluster the module operator's rows in `tests/test_trustyai_operators.py` skip
+because the Deployment is not there, and `tests/test_trustyai_workload.py` skips the
+override check for the same reason.
+
+**The EvalHub images need the same generation as the operator.** A rhoai-3.5 checkout
+pins `evalhub:latest` and `ta-lmes-job:latest` in its `params.env` — moving tags. Today's
+EvalHub 1.0 service creates a NetworkPolicy per job (eval-hub #1070), which that operator's
+`evalhub-jobs-writer` ClusterRole does not allow (`batch/jobs` only), and the current
+`ta-lmes-job` no longer speaks the job contract the 3.5 service drives. Both fail, from the
+service rather than the checks, so a 3.5 run that wants the EvalHub sections names that
+release's GA images — which `deploy` prints a reminder for:
+
+```sh
+k8s-tests up --operator-repo /path/to/rhoai-3.5-checkout \
+  --evalhub-img quay.io/opendatahub/odh-eval-hub:odh-3.5 \
+  --lmes-img quay.io/opendatahub/ta-lmes-job:odh-3.5-ga
+```
+
+With that pair the benchmark section passes on a 3.5 cluster; the checks themselves carry
+no release bound, because nothing about them is 3.6-specific.
+
+### Release gating
+
+The component does not look the same in every release, so a check can declare the ones
+it applies to:
+
+```python
+from utilities.release import release
+
+
+@release(min="3.6")
+def test_trustyai_module_crd_exists(api_client: client.ApiClient) -> None: ...
+```
+
+Declare the release under test with `--release` (the variable is `OPERATOR_RELEASE`, so it
+cannot be confused with the release of something else in the environment) and the session
+skips what falls outside it, with the range and the release in the skip reason:
+
+```sh
+k8s-tests test --release 3.5                     # or OPERATOR_RELEASE=3.5
+k8s-tests test --release 3.6 --select tests/test_trustyai_module.py
+OPERATOR_RELEASE=3.5 pytest -rs -m lmeval        # the same, without the harness
+```
+
+Bounds are inclusive and compared component by component, so `max="3.6"` covers 3.6.0
+but not 3.6.1, and `3.6-ea.2` compares as `3.6`. With no release declared nothing is
+gated: the checks run and the fixtures skip whatever the cluster does not have, which is
+how a bare `pytest` against a cluster somebody else deployed still works. The declared
+release is logged at the start of a run and printed in the HTML report.
+
+The ranges the checks declare today: the module stack (`tests/test_trustyai_module.py`,
+the module operator's row in `tests/test_trustyai_operators.py`, and the workload
+override check) needs the operator split that landed in 3.6, and so does the
+NetworkPolicy an `LMEvalJob` runs under (`tests/lmeval/`).
 
 ### Notes and troubleshooting
 

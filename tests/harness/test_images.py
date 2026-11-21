@@ -5,38 +5,39 @@ from __future__ import annotations
 import pytest
 
 from harness import images
+from harness.arch import require_operator_repo
 from harness.config import Settings
 from harness.shell import HarnessError
 
 
 def operator_checkout(tmp_path):
-    """A directory that looks like a trustyai-service-operator checkout."""
-    (tmp_path / images.MODULE_DIR).mkdir()
+    """A directory that looks like a modular trustyai-service-operator checkout."""
+    (tmp_path / "trustyai-operator-module").mkdir()
     (tmp_path / "Dockerfile").write_text("FROM scratch\n")
-    (tmp_path / images.MODULE_DIR / "Dockerfile").write_text("FROM scratch\n")
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "manager.yaml").write_text("kind: Deployment\n")
+    (tmp_path / "trustyai-operator-module" / "Dockerfile").write_text("FROM scratch\n")
+    (tmp_path / "config" / "default").mkdir(parents=True)
+    (tmp_path / "config" / "default" / "kustomization.yaml").write_text("resources: []\n")
     return tmp_path
 
 
 def test_the_checkout_is_required():
     with pytest.raises(HarnessError, match="OPERATOR_REPO must point at"):
-        images.operator_repo(Settings())
+        require_operator_repo(Settings())
 
 
 def test_a_missing_checkout_is_an_error(tmp_path):
     with pytest.raises(HarnessError, match="does not exist"):
-        images.operator_repo(Settings(operator_repo=str(tmp_path / "absent")))
+        require_operator_repo(Settings(operator_repo=str(tmp_path / "absent")))
 
 
 def test_a_directory_that_is_not_an_operator_checkout_is_refused(tmp_path):
     with pytest.raises(HarnessError, match="does not look like"):
-        images.operator_repo(Settings(operator_repo=str(tmp_path)))
+        require_operator_repo(Settings(operator_repo=str(tmp_path)))
 
 
 def test_a_checkout_that_has_the_layout_is_accepted(tmp_path):
     repo = operator_checkout(tmp_path)
-    assert images.operator_repo(Settings(operator_repo=str(repo))) == repo
+    assert require_operator_repo(Settings(operator_repo=str(repo))) == repo
 
 
 def test_two_trees_are_compared_in_content_and_members(tmp_path):
@@ -96,7 +97,24 @@ def test_building_the_load_path_images_clears_the_record(tmp_path, monkeypatch):
 def test_loading_refuses_images_the_engine_does_not_have(tmp_path, monkeypatch):
     monkeypatch.setattr(images, "image_present", lambda settings, image: False)
     with pytest.raises(HarnessError, match="k8s-tests images"):
+        images.load(Settings(operator_arch="single"))
+
+
+def test_loading_does_not_read_the_layout_from_the_current_directory(tmp_path, monkeypatch):
+    """A module tree under the cwd is not a configured checkout, and must not pick the layout."""
+    (tmp_path / "trustyai-operator-module").mkdir()
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(HarnessError, match="OPERATOR_REPO is not set"):
         images.load(Settings())
+
+
+def test_loading_a_single_layout_checkout_takes_one_image(tmp_path, monkeypatch):
+    loaded: list[str] = []
+    monkeypatch.setattr(images, "image_present", lambda settings, image: True)
+    monkeypatch.setattr(images, "save", lambda settings, image, archive: loaded.append(image))
+    monkeypatch.setattr(images, "run", lambda command, **kwargs: None)
+    images.load(Settings(operator_repo=str(tmp_path), operator_arch="single"))
+    assert loaded == [Settings().workload_img]
 
 
 def test_a_registry_checkout_that_is_missing_is_an_error():
@@ -106,7 +124,24 @@ def test_a_registry_checkout_that_is_missing_is_an_error():
 
 def test_skip_build_with_remove_after_push_is_refused(monkeypatch):
     monkeypatch.setattr(images, "require_cluster", lambda settings: None)
-    monkeypatch.setattr(images, "operator_repo", lambda settings: None)
+    monkeypatch.setattr(images, "require_operator_repo", lambda settings: None)
     settings = Settings(skip_build=True, remove_after_push=True)
     with pytest.raises(HarnessError, match="cannot be combined"):
         images.images_all(settings)
+
+
+def test_the_preflight_validates_the_checkout_and_its_layout(tmp_path):
+    """`check-operator-repo`, and the `up` that calls it, report the layout of a real checkout."""
+    repo = operator_checkout(tmp_path)
+    with pytest.raises(HarnessError, match="OPERATOR_REPO must point at"):
+        images.check_operator_repo(Settings())
+    with pytest.raises(HarnessError, match="the single layout is for a pre-module checkout"):
+        images.check_operator_repo(Settings(operator_repo=str(repo), operator_arch="single"))
+
+
+def test_images_all_validates_the_checkout_before_it_starts_anything(monkeypatch):
+    """`images-all` stops on a missing checkout instead of starting the registry first."""
+    monkeypatch.setattr(images, "require_cluster", lambda settings: None)
+    monkeypatch.setattr(images.registry, "ensure", lambda settings: pytest.fail("the registry was started"))
+    with pytest.raises(HarnessError, match="OPERATOR_REPO must point at"):
+        images.images_all(Settings(skip_build=True))

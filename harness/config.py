@@ -85,6 +85,28 @@ SETTINGS: tuple[Setting, ...] = (
         help="trustyai-service-operator checkout the images and manifests come from (required by images, deploy)",
     ),
     Setting(
+        field="operator_arch",
+        envvar="OPERATOR_ARCH",
+        default="",
+        kind="choice",
+        choices=("modular", "single"),
+        help=(
+            "operator layout to deploy: modular (a 3.6+ checkout, module operator) or single (3.5 and "
+            "earlier); empty follows the checkout, and naming one the checkout lacks is an error"
+        ),
+    ),
+    Setting(
+        field="release",
+        envvar="OPERATOR_RELEASE",
+        flag="--release",
+        default="",
+        help=(
+            "RHOAI/ODH release the operator checkout is from, for example 3.5 or 3.6; the checks "
+            "declaring a different range are skipped (OPERATOR_RELEASE, so it cannot be confused "
+            "with the release of something else in the environment)"
+        ),
+    ),
+    Setting(
         field="namespace",
         envvar="NAMESPACE",
         default="system",
@@ -303,6 +325,8 @@ class Settings:
     """The resolved settings, with the derived values filled in."""
 
     operator_repo: str = ""
+    operator_arch: str = ""
+    release: str = ""
     namespace: str = "system"
     kube_context: str = ""
     kubectl: str = "kubectl"
@@ -398,11 +422,16 @@ class Settings:
         return Path(self.adapters_report_file).expanduser()
 
     def with_updates(self, **updates: Any) -> Settings:
-        """These settings with some values replaced; a derived image reference follows TAG."""
+        """These settings with some values replaced; the values other ones derive from follow them."""
         derived = {
             "workload_img": self.workload_img if self.workload_img != self.default_workload_img else "",
             "module_img": self.module_img if self.module_img != self.default_module_img else "",
         }
+        # The context follows the cluster name unless the caller named one - including when
+        # the cluster is named on a command rather than on the group (`cluster --kind-cluster
+        # other`), where the group has already derived a context from its own default.
+        if "kind_cluster" in updates and "kube_context" not in updates and "kube_context" not in self.explicit:
+            derived["kube_context"] = ""
         named = frozenset(name for name, value in updates.items() if value is not None)
         merged = {**derived, **{name: value for name, value in updates.items() if value is not None}}
         return replace(self, **merged, explicit=self.explicit | named)

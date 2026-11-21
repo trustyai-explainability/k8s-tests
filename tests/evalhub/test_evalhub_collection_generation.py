@@ -61,10 +61,13 @@ from utilities.evalhub_auth import (
     tenant_user_role,
 )
 from utilities.kube import mint_token, read_deployment
+from utilities.release import release
 
 LOGGER = logging.getLogger(__name__)
 
-pytestmark = [pytest.mark.evalhub, pytest.mark.generation]
+# The section's premise is 3.6: the operator names the policy ConfigMap after the
+# instance and a digest of its policy, and the generation paths exist to be authorized.
+pytestmark = [pytest.mark.evalhub, pytest.mark.generation, release(min="3.6")]
 
 # The methods the policy has to split across the two generation entries, and the
 # verb each one maps to.

@@ -17,6 +17,7 @@ import pytest
 from kubernetes import client
 
 from utilities.kube import container_images, read_deployment
+from utilities.release import release
 from utilities.trustyai import (
     MODULE_OPERATOR_DEPLOYMENT,
     WORKLOAD_CONFIG_MAP,
@@ -25,6 +26,7 @@ from utilities.trustyai import (
     WORKLOAD_IMAGE_VAR,
     WORKLOAD_OPERATOR_DEPLOYMENT,
     deployment_env,
+    deployment_exists,
     expected_image_from_env,
     read_config_map,
 )
@@ -43,8 +45,14 @@ def _workload_operator_image(apps_client: client.AppsV1Api, namespace: str) -> s
     return images[0]
 
 
+@release(min="3.6")
 def test_workload_operator_image_matches_the_module_override(apps_client: client.AppsV1Api, namespace: str) -> None:
     """The workload operator runs the image the module operator was told to render."""
+    if not deployment_exists(apps_client, MODULE_OPERATOR_DEPLOYMENT, namespace):
+        pytest.skip(
+            f"deployment {namespace}/{MODULE_OPERATOR_DEPLOYMENT} is not present; nothing renders the workload "
+            "operator on this cluster, so there is no override to compare against"
+        )
     override = deployment_env(
         apps_client,
         name=MODULE_OPERATOR_DEPLOYMENT,

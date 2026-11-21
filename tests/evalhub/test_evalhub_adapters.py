@@ -28,6 +28,9 @@ from utilities.model import ModelEndpoint
 
 LOGGER = logging.getLogger(__name__)
 
+# One real benchmark per job, through the same tenant RBAC and image pairing as the
+# benchmark section: a pre-module operator needs an EvalHub service and adapter image from
+# its own generation (see that module).
 pytestmark = [pytest.mark.evalhub, pytest.mark.adapters]
 
 LM_EVAL_PROVIDER = "lm_evaluation_harness"

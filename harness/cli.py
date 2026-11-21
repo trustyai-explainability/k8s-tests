@@ -191,7 +191,7 @@ def deploy_registry(settings: Settings) -> None:
 @cli.command()
 @click.pass_obj
 def up(settings: Settings) -> None:
-    """Create the cluster, build, load and deploy, and wait for both operators."""
+    """Create the cluster, build, load and deploy, and wait for the operators."""
     image_ops.check_operator_repo(settings)
     cluster_ops.create(settings)
     image_ops.build_load_path_images(settings)

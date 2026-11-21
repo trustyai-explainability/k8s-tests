@@ -22,6 +22,13 @@ from utilities.model import ModelEndpoint
 
 LOGGER = logging.getLogger(__name__)
 
+# Nothing here is release-specific: what a pre-module cluster needs is an EvalHub service
+# and adapter image from its own generation. The 3.5 operator pins `evalhub:latest` and
+# `ta-lmes-job:latest`, both moving tags whose current content no longer pairs with its
+# RBAC (a 1.0 service creates a NetworkPolicy per job, eval-hub #1070, which 3.5 does not
+# allow) or with its job contract. The GA pair `odh-eval-hub:odh-3.5` and
+# `ta-lmes-job:odh-3.5-ga` does, and `deploy` warns when a single-layout run leaves both
+# at the operator's pins.
 pytestmark = [pytest.mark.evalhub, pytest.mark.benchmark]
 
 BENCHMARK_ID = "arc_easy"
