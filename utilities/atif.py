@@ -281,6 +281,7 @@ def publish(
     namespace: str,
     name: str,
     files: dict[str, bytes],
+    entries: int | None = None,
 ) -> Export:
     """Write an export onto a claim, so a job can mount it as its `test_data_ref`.
 
@@ -351,7 +352,12 @@ def publish(
         if exc.status != 409:
             raise
     _wait_for_job(batch_client, f"{name}-loader", namespace)
-    return Export(claim_name=name, sub_path=EXPORT_SUBPATH, entries=_manifest_entries(files))
+    return Export(
+        claim_name=name,
+        sub_path=EXPORT_SUBPATH,
+        # A scan-discovered export ships no manifest, so the caller counts its files.
+        entries=entries if entries is not None else _manifest_entries(files),
+    )
 
 
 def _manifest_entries(files: dict[str, bytes]) -> int:

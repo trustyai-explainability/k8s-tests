@@ -29,18 +29,21 @@ exercise the checkout rather than the operator's pin.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 import requests
 from kubernetes import client
 
-from utilities import atif, mlflow
+from utilities import atif, atif_producers, mlflow
 from utilities.atif import BENCHMARK_ID, PRIMARY_METRIC, Export, export_files, job_payload, publish
 from utilities.evalhub import (
     EVALHUB_CONTAINER_NAME,
@@ -157,11 +160,14 @@ def atif_provider_image(core_client: client.CoreV1Api, namespace: str) -> str | 
     """Check that the provider will run the image this run built.
 
     The image cannot be changed on a running cluster: the provider ConfigMaps are rendered
-    into the operator image from `config/overlays/*/params.env`, and the operator re-applies
-    them within about 30 seconds, so a patch to the ConfigMap is reverted. Unlike inspect and
-    lighteval, `evalhub-provider-atif-image` has no `RELATED_IMAGE_*` resolver key, so the
-    override has to happen before the operator is built. The section fails here rather than
-    silently exercising the operator's pin, whose behaviour is not what the checks assert.
+    from the template baked into the module operator image (`config/manifests-template`),
+    and the operator re-applies them on every reconcile, so a patch to the ConfigMap is
+    reverted. `evalhub-provider-atif-image` has no `RELATED_IMAGE_*` variable either, so
+    the harness fixes the value while it builds that image: passing `--atif-img` to any
+    command that builds and deploys (`up`, `up-registry`) stages a patched copy of the
+    template and bakes it in, which is why the value is right from the operator's first
+    start rather than patched in afterwards. The section fails here rather than silently
+    exercising the operator's pin, whose behaviour is not what the checks assert.
     """
     image = os.environ.get("ATIF_IMG", "").strip()
     running, config_map = _provider_image(core_client, namespace)
@@ -171,10 +177,12 @@ def atif_provider_image(core_client: client.CoreV1Api, namespace: str) -> str | 
     if running != image and os.environ.get("ATIF_ALLOW_PINNED_IMAGE", "").strip() != "1":
         pytest.fail(
             f"the atif provider runs {running} ({namespace}/{config_map}), not {image}. "
-            "The provider image is rendered from the operator's config/overlays/*/params.env at build "
-            "time (evalhub-provider-atif-image) and re-applied within seconds, so patching the ConfigMap "
-            "does not hold: set that key in the operator checkout and rebuild with `k8s-tests up-registry` "
-            "before running this section, or set ATIF_ALLOW_PINNED_IMAGE=1 to test the pin on purpose.",
+            "The provider image is baked into the module operator image from "
+            "config/manifests-template when that image is built, so it is fixed before the "
+            "operator starts and cannot be patched afterwards: pass this image to a command "
+            "that builds and deploys (`k8s-tests --atif-img <image> up`, or `up-registry`) and "
+            "run the section against the same value, or set ATIF_ALLOW_PINNED_IMAGE=1 to test "
+            "the operator's pin on purpose.",
             pytrace=False,
         )
     LOGGER.info("the atif provider runs %s (%s/%s)", running, namespace, config_map)
@@ -300,8 +308,15 @@ def tracking(
         yield server
 
 
-def _publish(core_client, batch_client, namespace: str, name: str, files: dict[str, bytes]) -> Export:
-    return publish(core_client, batch_client, namespace, name, files)
+def _publish(
+    core_client,
+    batch_client,
+    namespace: str,
+    name: str,
+    files: dict[str, bytes],
+    entries: int | None = None,
+) -> Export:
+    return publish(core_client, batch_client, namespace, name, files, entries=entries)
 
 
 def _submit(
@@ -782,3 +797,276 @@ def test_an_undeclared_root_field_is_invalid_input(
     assert PRIMARY_METRIC not in metrics, f"an undeclared root field was scored: {metrics}"
     report = tracking.wait_for_artifact("atif-undeclared", ARTIFACT)
     assert '"invalid_schema"' in report, f"the report does not record the schema rejection: {report[:1000]}"
+
+
+# --- RHAI-22313: producer shapes, golden values and the matrix -----------------
+#
+# The checks above cover the manifest lifecycle on one producer's export. These cover
+# what changes when the *producer* does: a directory export with no manifest to order
+# it, the field profile a producer records, the values a run reproduces, and the
+# committed matrix that says which producer and difference class each check covers.
+#
+# The difference classes, and where each is checked:
+#
+#   joining and naming  - Harbor ships no manifest, so discovery is content-based and
+#                         a file that is not a trajectory is ignored; NeMo Gym's
+#                         manifest is authoritative (test_the_manifest_drives_discovery).
+#   provenance          - a manifestless export still records the hash of the bytes
+#                         the adapter read; a manifest export adds the producer's
+#                         digest and indices (test_the_run_records_manifest_provenance).
+#   field handling      - Harbor records token metrics and multimodal content parts,
+#                         NeMo Gym refuses both; the score must not move.
+
+FIXTURES = Path(__file__).parent / "fixtures"
+GOLDEN = FIXTURES / "atif_golden.json"
+MATRIX = FIXTURES / "atif_producer_matrix.md"
+# eval-hub aggregates the per-trajectory scores into a float32; the adapter's own values
+# are exact, and the aggregate is pinned at this tolerance rather than bit-for-bit.
+GOLDEN_TOLERANCE = 1e-06
+MATRIX_CLASSES = ("Joining and naming", "Provenance", "Field handling")
+
+
+@pytest.fixture(scope="module")
+def harbor_scan_run(
+    tenant_ready: None,
+    core_client: client.CoreV1Api,
+    batch_client: client.BatchV1Api,
+    evalhub_instance_namespace: str,
+    evalhub_api_base: str,
+    evalhub_tenant_token: str,
+    evalhub_tenant_namespace: str,
+    judge: str,
+    evalhub_mlflow: str,
+) -> dict[str, Any]:
+    """A Harbor export: two documents discovered by content, no manifest, and a non-trajectory file."""
+    entries = 2
+    export = _publish(
+        core_client,
+        batch_client,
+        evalhub_tenant_namespace,
+        "atif-harbor-scan",
+        atif_producers.export_files(atif_producers.HARBOR, entries=entries),
+        entries=entries,
+    )
+    return _run(
+        name="atif-harbor-scan",
+        export=export,
+        judge_url=judge,
+        experiment="atif-harbor-scan",
+        evalhub_api_base=evalhub_api_base,
+        evalhub_tenant_token=evalhub_tenant_token,
+        evalhub_tenant_namespace=evalhub_tenant_namespace,
+        parameters={"partial_result_policy": "fail_fast"},
+    ) | {"export": export}
+
+
+def test_a_directory_export_is_discovered_without_a_manifest(harbor_scan_run: dict[str, Any]) -> None:
+    """Joining and naming: Harbor ships no manifest, so the adapter discovers its directory.
+
+    The export carries two `*.trajectory.json` documents, whose names match none of the
+    adapter's naming rules, plus a `.json` that is not a trajectory at all. Discovery has
+    to reach both documents by their content and leave the third file out of the count.
+    """
+    assert harbor_scan_run["status"] == "completed", (
+        f"job ended {harbor_scan_run['status']}: {harbor_scan_run['message']}"
+    )
+    metrics = _metrics(benchmark_result(harbor_scan_run["job"], BENCHMARK_ID))
+    assert metrics.get("atif_trajectory_count") == float(harbor_scan_run["export"].entries), (
+        f"the run scored {metrics}, not the {harbor_scan_run['export'].entries} documents in the export"
+    )
+    assert PRIMARY_METRIC in metrics, f"a manifestless export scored without {PRIMARY_METRIC}: {metrics}"
+
+
+def test_a_directory_export_carries_the_hash_of_the_bytes_read(
+    harbor_scan_run: dict[str, Any],
+    tracking: TrackingServer,
+) -> None:
+    """Provenance: with no producer digest, the adapter still records its own per trajectory."""
+    assert harbor_scan_run["status"] == "completed", harbor_scan_run["message"]
+    metadata = _report(tracking.wait_for_artifact("atif-harbor-scan", ARTIFACT))["evaluation_metadata"]
+    scored = metadata["atif_trajectories"]
+    assert len(scored) == harbor_scan_run["export"].entries, f"the report scored {len(scored)}: {scored}"
+    for entry in scored:
+        provenance = entry["provenance"]
+        assert re.fullmatch(r"[0-9a-f]{64}", provenance["sha256"] or ""), (
+            f"{entry['trajectory_id']} carries no hash of the bytes read: {provenance}"
+        )
+        assert "nemo_gym_manifest" not in provenance, (
+            f"{entry['trajectory_id']} claims a manifest it was not discovered by: {provenance}"
+        )
+        assert provenance["source_uri"].endswith(".trajectory.json"), (
+            f"{entry['trajectory_id']} came from {provenance['source_uri']}, not the document it was"
+        )
+
+
+@pytest.fixture(scope="module")
+def plain_harbor_run(
+    tenant_ready: None,
+    core_client: client.CoreV1Api,
+    batch_client: client.BatchV1Api,
+    evalhub_instance_namespace: str,
+    evalhub_api_base: str,
+    evalhub_tenant_token: str,
+    evalhub_tenant_namespace: str,
+    judge: str,
+    evalhub_mlflow: str,
+) -> dict[str, Any]:
+    """The same Harbor text with no token metrics and no multimodal content parts."""
+    export = _publish(
+        core_client,
+        batch_client,
+        evalhub_tenant_namespace,
+        "atif-harbor-plain",
+        atif_producers.export_files(atif_producers.HARBOR, entries=1, rich_fields=False, unlisted=False),
+        entries=1,
+    )
+    return _run(
+        name="atif-harbor-plain",
+        export=export,
+        judge_url=judge,
+        experiment="atif-harbor-plain",
+        evalhub_api_base=evalhub_api_base,
+        evalhub_tenant_token=evalhub_tenant_token,
+        evalhub_tenant_namespace=evalhub_tenant_namespace,
+        parameters={"partial_result_policy": "fail_fast"},
+    ) | {"export": export}
+
+
+def test_a_producers_field_profile_does_not_move_the_score(
+    harbor_scan_run: dict[str, Any],
+    plain_harbor_run: dict[str, Any],
+) -> None:
+    """Field handling: token metrics and media are projected away, so NeMo Gym's omissions cannot cost.
+
+    Harbor records a content-part message with an image and a step's token metrics, and
+    NeMo Gym refuses both at ingestion, so the same trajectory reaches the adapter in two
+    shapes. The adapter judges the text and drops the rest, so an export that omits them
+    cannot score differently from one that carries them - which is why difference class 3
+    needs no adapter change.
+    """
+    for run in (harbor_scan_run, plain_harbor_run):
+        assert run["status"] == "completed", f"{run['payload']['name']} ended {run['status']}: {run['message']}"
+    rich = _metrics(benchmark_result(harbor_scan_run["job"], BENCHMARK_ID))
+    plain = _metrics(benchmark_result(plain_harbor_run["job"], BENCHMARK_ID))
+    assert PRIMARY_METRIC in rich, f"the rich export did not score: {rich}"
+    assert PRIMARY_METRIC in plain, f"the plain export did not score: {plain}"
+    assert abs(rich[PRIMARY_METRIC] - plain[PRIMARY_METRIC]) <= GOLDEN_TOLERANCE, (
+        f"dropping token metrics and media moved the score from {rich[PRIMARY_METRIC]} to {plain[PRIMARY_METRIC]}"
+    )
+
+
+def test_the_golden_values_are_reproduced(harbor_scan_run: dict[str, Any]) -> None:
+    """The adapter's values for a Harbor export are pinned, so a scoring change fails a check.
+
+    The golden file names the image tag and SDK it was captured from, and every metric it
+    records is asserted: exact on the adapter-emitted values, within the file's tolerance
+    on the aggregate, and never satisfied by an empty result.
+    """
+    golden = json.loads(GOLDEN.read_text())
+    captured = golden["captured_from"]
+    assert captured["adapter_image"], "the golden file does not name the image it was captured from"
+    assert captured["adapter_sdk"], "the golden file does not name the SDK it was captured from"
+    expected = golden["producers"]["Harbor"]
+    assert harbor_scan_run["status"] == "completed", harbor_scan_run["message"]
+    metrics = _metrics(benchmark_result(harbor_scan_run["job"], BENCHMARK_ID))
+    tolerance = float(expected.get("tolerance", GOLDEN_TOLERANCE))
+    for name, value in expected["metrics"].items():
+        assert value, f"the golden file records {name} as {value}, which an empty result would also satisfy"
+        assert name in metrics, f"the run did not report {name}: {metrics}"
+        assert abs(metrics[name] - float(value)) <= tolerance, f"{name} is {metrics[name]}, not the golden {value}"
+    for name in expected.get("absent_metrics", []):
+        assert metrics.get(name) in (None, 0.0), f"{name} is {metrics.get(name)!r} for an export with no manifest"
+
+
+@pytest.fixture(scope="module")
+def unscored_harbor_run(
+    tenant_ready: None,
+    core_client: client.CoreV1Api,
+    batch_client: client.BatchV1Api,
+    evalhub_instance_namespace: str,
+    evalhub_api_base: str,
+    evalhub_tenant_token: str,
+    evalhub_tenant_namespace: str,
+    judge: str,
+    evalhub_mlflow: str,
+) -> dict[str, Any]:
+    """A Harbor export whose judge is unreachable, so nothing can be scored."""
+    export = _publish(
+        core_client,
+        batch_client,
+        evalhub_tenant_namespace,
+        "atif-harbor-unscored",
+        atif_producers.export_files(atif_producers.HARBOR, entries=1, unlisted=False),
+        entries=1,
+    )
+    dead_judge = judge.replace(f":{atif.JUDGE_PORT}/", ":9/")
+    return _run(
+        name="atif-harbor-unscored",
+        export=export,
+        judge_url=judge,
+        model_url=dead_judge,
+        experiment="atif-harbor-unscored",
+        evalhub_api_base=evalhub_api_base,
+        evalhub_tenant_token=evalhub_tenant_token,
+        evalhub_tenant_namespace=evalhub_tenant_namespace,
+        parameters={"partial_result_policy": "skip_failed_trajectory"},
+    ) | {"export": export}
+
+
+def test_an_unscored_harbor_job_publishes_no_score(unscored_harbor_run: dict[str, Any]) -> None:
+    """The unscored case for a manifestless producer: no `atif_overall_score`, and not complete."""
+    assert unscored_harbor_run["status"] == "completed", (
+        f"an unscored job ended {unscored_harbor_run['status']}: {unscored_harbor_run['message']}"
+    )
+    result = benchmark_result(unscored_harbor_run["job"], BENCHMARK_ID)
+    metrics = _metrics(result)
+    assert PRIMARY_METRIC not in metrics, f"an unscored Harbor export published {PRIMARY_METRIC}: {metrics}"
+    assert metrics.get("atif_trajectory_count") == 0.0, f"the result counted a scored trajectory: {metrics}"
+    index = (result.get("artifacts") or {}).get("evalhub.atif_report") or {}
+    assert index.get("complete") is False, f"an unscored job reported itself complete: {index}"
+
+
+def _matrix_rows() -> list[tuple[str, list[str]]]:
+    """The matrix's data rows: a producer and one cell per difference class."""
+    rows: list[tuple[str, list[str]]] = []
+    for line in MATRIX.read_text().splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) != len(MATRIX_CLASSES) + 2 or cells[0] in ("Producer", "") or set(cells[0]) <= {"-"}:
+            continue
+        rows.append((cells[0], cells[1 : len(MATRIX_CLASSES) + 1]))
+    return rows
+
+
+def test_the_matrix_only_names_checks_that_run() -> None:
+    """Every row of the matrix resolves, or says unvalidated: a row cannot claim coverage it lacks.
+
+    The check reads this module rather than the session, so it holds whatever selection a
+    run made: a node id the matrix names has to point at this file and a test defined in
+    it. A cell that starts with `unvalidated` is exempt on purpose - the producer has no
+    export to test against, and inventing one would test the invention.
+    """
+    defined = {
+        node.name
+        for node in ast.parse(Path(__file__).read_text()).body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
+    }
+    rows = _matrix_rows()
+    assert {producer.name for producer in atif_producers.PRODUCERS} == {name for name, _ in rows}, (
+        "the matrix and utilities.atif_producers disagree about which producers exist"
+    )
+    missing: list[str] = []
+    for producer, cells in rows:
+        for difference_class, cell in zip(MATRIX_CLASSES, cells, strict=True):
+            if cell.startswith("unvalidated"):
+                continue
+            named = re.findall(r"`([^`]+)`", cell)
+            if not named:
+                missing.append(f"{producer}/{difference_class} names no check and is not marked unvalidated")
+                continue
+            for node_id in named:
+                path, _, function = node_id.partition("::")
+                if path != "tests/evalhub/test_evalhub_atif.py" or function not in defined:
+                    missing.append(f"{producer}/{difference_class} names {node_id}, which does not resolve")
+    assert not missing, "the matrix names checks that do not run:\n" + "\n".join(missing)
