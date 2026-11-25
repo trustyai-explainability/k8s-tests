@@ -289,6 +289,7 @@ Every one is a flag and an environment variable; `k8s-tests --help` lists them a
 | `LMES_REPO` | `../lm-evaluation-harness` | Checkout `images-all` builds `community-lmes` from (`Dockerfile.lmes-job`) |
 | `ADAPTERS` | `all` | `all`, `lmes`, or a comma-separated list of eval-hub-contrib adapter directories |
 | `LMES_IMG` / `INSPECT_IMG` / `LIGHTEVAL_IMG` | *(empty)* | Adapter image overrides passed through the module operator (`RELATED_IMAGE_ODH_*`) |
+| `GARAK_IMG` | *(empty)* | garak adapter image, passed through `RELATED_IMAGE_ODH_TRUSTYAI_GARAK_LLS_PROVIDER_DSP_IMAGE` (`garak-provider-image` on a pre-module operator). Set it to test a build of the adapter, for example one loaded with `kind load image-archive`. Operators before trustyai-explainability/trustyai-service-operator#1145 (3.5 included) pin an image that needs credentials to pull, so garak's adapters run needs this set against them |
 | `PLATFORM` | engine host platform | Platform the images are built for (`linux/arm64` on Apple Silicon) |
 | `IMAGES_ENV_FILE` | `reports/images.env` | Where `images-all` writes the image references and `deploy` and the checks read them |
 | `REMOVE_AFTER_PUSH` | *(empty)* | `images-all` removes each local image after pushing it; frees the podman machine's disk (incompatible with `SKIP_BUILD`) |
@@ -582,10 +583,11 @@ k8s-tests test --pytest-args "-m 'not benchmark'"
 `tests/evalhub/test_evalhub_adapters.py` is the section that runs real benchmarks. Every
 entry in its `BENCHMARKS` table is one adapter run: submitted through the API,
 waited for until the adapter finishes in the cluster, and read back as a result.
-It covers one today, `ethics_cm` (commonsense moral judgment) of the
-`lm_evaluation_harness` provider with `num_examples: 1`; adding a benchmark is one
-more entry in that table, and every check then runs once for it, under a
-`[<benchmark>]` id. Its jobs call the same endpoint the benchmark job does: the
+It covers two today: `ethics_cm` (commonsense moral judgment) of the
+`lm_evaluation_harness` provider, and `quick` (one DAN probe) of the `garak` provider,
+each with `num_examples: 1`. Adding a benchmark is one more entry in that table, and
+every check then runs once for it, under a `[<provider>-<benchmark>]` id, so
+`--pytest-args "-k garak"` runs one provider's entries alone. Its jobs call the same endpoint the benchmark job does: the
 emulator the fixtures deploy, or `MODEL_URL` when that is set, with `MODEL_KEY` as
 the credential.
 
@@ -593,7 +595,7 @@ For each benchmark the section asserts that the job is accepted with exactly tha
 benchmark, its provider and its `num_examples`; that the job and the benchmark
 alone reach `completed`; that `results.benchmarks[]` carries the benchmark, its
 provider and numeric metrics; that the metric the provider config scores it on
-(`acc` for `ethics_cm`) is among those metrics and is a rate; that the provider's
+(`acc` for `ethics_cm`, `attack_success_rate` for `quick`) is among those metrics and is a rate; that the provider's
 pass criteria turn the score into a `test` block; and, when the model is the
 emulator, that it authenticated the job's model requests, so the model was called
 rather than the job merely reporting success.
