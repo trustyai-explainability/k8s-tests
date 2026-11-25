@@ -21,6 +21,7 @@ def test_each_operand_image_named_becomes_its_related_image():
         lmes_img="quay.io/me/lmes:mine",
         inspect_img="quay.io/me/inspect:mine",
         lighteval_img="quay.io/me/lighteval:mine",
+        garak_img="quay.io/me/garak:mine",
         kube_rbac_proxy_img="quay.io/me/proxy:mine",
     )
     variables = dict(deploy.related_image_env(settings))
@@ -28,6 +29,7 @@ def test_each_operand_image_named_becomes_its_related_image():
     assert variables["RELATED_IMAGE_ODH_TA_LMES_JOB_IMAGE"] == "quay.io/me/lmes:mine"
     assert variables["RELATED_IMAGE_ODH_EVAL_HUB_INSPECTAI_IMAGE"] == "quay.io/me/inspect:mine"
     assert variables["RELATED_IMAGE_ODH_EVAL_HUB_LIGHTEVAL_IMAGE"] == "quay.io/me/lighteval:mine"
+    assert variables["RELATED_IMAGE_ODH_TRUSTYAI_GARAK_LLS_PROVIDER_DSP_IMAGE"] == "quay.io/me/garak:mine"
     assert variables["RELATED_IMAGE_ODH_KUBE_RBAC_PROXY_IMAGE"] == "quay.io/me/proxy:mine"
     assert variables["RELATED_IMAGE_ODH_TRUSTYAI_SERVICE_PY_IMAGE"] == Settings().trustyai_service_img
 
@@ -251,6 +253,7 @@ def test_the_single_layout_hands_over_every_operand_image_it_was_given():
             evalhub_img="quay.io/opendatahub/odh-eval-hub:odh-3.5",
             lmes_img="quay.io/opendatahub/ta-lmes-job:odh-3.5",
             kube_rbac_proxy_img="quay.io/opendatahub/odh-kube-rbac-proxy:odh-stable",
+            garak_img="quay.io/me/garak:mine",
             trustyai_service_img="quay.io/trustyai/trustyai-service:latest",
         )
     )
@@ -259,6 +262,7 @@ def test_the_single_layout_hands_over_every_operand_image_it_was_given():
         "evalHubImage": "quay.io/opendatahub/odh-eval-hub:odh-3.5",
         "kube-rbac-proxy": "quay.io/opendatahub/odh-kube-rbac-proxy:odh-stable",
         "lmes-pod-image": "quay.io/opendatahub/ta-lmes-job:odh-3.5",
+        "garak-provider-image": "quay.io/me/garak:mine",
     }
     assert deploy.operand_images(Settings(evalhub_img="", lmes_img="")) == {
         "trustyaiServiceImage": "quay.io/trustyai/trustyai-service:latest"

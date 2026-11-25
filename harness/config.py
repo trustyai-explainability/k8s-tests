@@ -217,6 +217,12 @@ SETTINGS: tuple[Setting, ...] = (
         help="LightEval adapter image; empty keeps the operator's pin",
     ),
     Setting(
+        field="garak_img",
+        envvar="GARAK_IMG",
+        default="",
+        help="garak adapter image; empty keeps the operator's pin",
+    ),
+    Setting(
         field="atif_img",
         envvar="ATIF_IMG",
         default="",
@@ -379,6 +385,7 @@ class Settings:
     lmes_img: str = ""
     inspect_img: str = ""
     lighteval_img: str = ""
+    garak_img: str = ""
     atif_img: str = ""
     mlflow_img: str = ""
     timeout: str = "300s"
