@@ -14,7 +14,7 @@ from harness.shell import HarnessError
     [
         ("standard", "not adapters"),
         ("all", None),
-        ("adapters", "adapters and not atif"),
+        ("adapters", "adapters"),
         ("adapters-atif", "atif"),
         ("evalhub", "evalhub and not adapters"),
         ("generation", "evalhub and generation"),
@@ -95,3 +95,38 @@ def test_the_suite_and_its_configuration_are_named_outright():
 def test_an_empty_select_is_an_error():
     with pytest.raises(HarnessError, match="must name a pytest selection"):
         tests.pytest_arguments(Settings(), section="all", marker=None, select=("   ",), report=None)
+
+
+# --- the image record `deploy` stamps, read back by `test` ---------------------------
+
+
+def stamped_record(tmp_path, lines: dict[str, str]):
+    """An image record as `deploy` leaves it: the images it brought up, and the marker."""
+    path = tmp_path / "images.env"
+    marker = "# Written by k8s-tests deploy"
+    path.write_text("\n".join([marker, *(f"{key}={value}" for key, value in lines.items())]) + "\n")
+    return path
+
+
+def test_a_deployed_record_supplies_the_adapter_image_once(tmp_path):
+    """`up --atif-img X` then `test` needs no second flag: the record says what was deployed."""
+    path = stamped_record(tmp_path, {"ATIF_IMG": "localhost/evalhub/community-atif:dev"})
+    settings = tests.settings_for_run(Settings(images_env_file=str(path)))
+    assert settings.atif_img == "localhost/evalhub/community-atif:dev"
+
+
+def test_an_explicit_image_still_wins_over_the_record(tmp_path):
+    path = stamped_record(tmp_path, {"ATIF_IMG": "localhost/evalhub/community-atif:dev"})
+    named = Settings(
+        images_env_file=str(path),
+        atif_img="quay.io/evalhub/community-atif:v1.1.0-alpha.1",
+        explicit=frozenset({"atif_img"}),
+    )
+    assert tests.settings_for_run(named).atif_img == "quay.io/evalhub/community-atif:v1.1.0-alpha.1"
+
+
+def test_a_build_only_record_is_not_trusted(tmp_path):
+    """An unstamped record describes a build that was never deployed, so it fills nothing."""
+    path = tmp_path / "images.env"
+    path.write_text("ATIF_IMG=localhost/evalhub/community-atif:dev\n")
+    assert tests.settings_for_run(Settings(images_env_file=str(path))).atif_img == ""

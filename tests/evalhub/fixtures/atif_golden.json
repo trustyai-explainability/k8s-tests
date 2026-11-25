@@ -1,0 +1,20 @@
+{
+  "captured_from": {
+    "adapter_image": "quay.io/evalhub/community-atif:v1.1.0-alpha.1",
+    "adapter_sdk": "eval-hub-sdk~=1.1.0",
+    "judge": "the section's stub judge, which answers every step with score 0.75",
+    "note": "RHAI-22313 asks for community-atif:v0.7.0; the operator pins v1.1.0-alpha.1 since eval-hub-sdk#203 and trustyai-service-operator#1138, so the tag recorded here is the one a run actually ships"
+  },
+  "producers": {
+    "Harbor": {
+      "export": "2 ATIF-v1.6 documents named <rollout>.trajectory.json, no manifest, one non-trajectory .json beside them",
+      "tolerance": 1e-06,
+      "metrics": {
+        "atif_overall_score": 0.75,
+        "atif_failure_categorization_rate": 1.0,
+        "atif_trajectory_count": 2.0
+      },
+      "absent_metrics": ["atif_manifest_entry_count"]
+    }
+  }
+}

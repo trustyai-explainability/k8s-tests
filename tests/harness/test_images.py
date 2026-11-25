@@ -145,3 +145,161 @@ def test_images_all_validates_the_checkout_before_it_starts_anything(monkeypatch
     monkeypatch.setattr(images.registry, "ensure", lambda settings: pytest.fail("the registry was started"))
     with pytest.raises(HarnessError, match="OPERATOR_REPO must point at"):
         images.images_all(Settings(skip_build=True))
+
+
+# --- provider images the module operator has no RELATED_IMAGE_* variable for ----------
+#
+# `evalhub-provider-atif-image` is rendered from the template baked into the module image,
+# and the module operator rewrites params.env only for the keys its own map names. So the
+# harness fixes the provider at build time, in a temp copy of the module checkout.
+
+
+def module_tree(tmp_path):
+    """A module checkout whose template carries the atif provider, as the real one does."""
+    module = tmp_path / "trustyai-operator-module"
+    template = module / "config" / "manifests-template"
+    for overlay in ("base", "overlays/odh"):
+        params = template / overlay / "params.env"
+        params.parent.mkdir(parents=True, exist_ok=True)
+        params.write_text(
+            "evalhub-provider-atif-image=quay.io/evalhub/community-atif:v1.1.0-alpha.1\n"
+            "trustyaiServiceImage=quay.io/trustyai/trustyai-service:latest\n"
+        )
+    config = template / "configmaps" / "evalhub" / "provider-atif.yaml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("      image: $(evalhub-provider-atif-image)\n      image_pull_policy: always\n")
+    (module / "Dockerfile").write_text("FROM scratch\n")
+    return module
+
+
+def test_an_adapter_without_a_related_image_is_staged():
+    settings = Settings(atif_img="localhost/evalhub/community-atif:dev", adapters="atif")
+    assert images.unmapped_adapter_overrides(settings) == [
+        ("evalhub-provider-atif-image", "atif", "localhost/evalhub/community-atif:dev")
+    ]
+
+
+def test_an_adapter_with_a_related_image_is_left_alone():
+    """lighteval reaches the workload operator through RELATED_IMAGE_ODH_EVAL_HUB_LIGHTEVAL_IMAGE."""
+    settings = Settings(lighteval_img="quay.io/evalhub/community-lighteval:dev", adapters="lighteval")
+    assert images.unmapped_adapter_overrides(settings) == []
+
+
+def test_no_override_builds_from_the_checkout_unchanged(tmp_path):
+    module = module_tree(tmp_path)
+    with images.staged_module_context(Settings(), module, []) as context:
+        assert context == module
+
+
+def test_the_staged_context_carries_the_image_and_leaves_the_checkout_alone(tmp_path):
+    module = module_tree(tmp_path)
+    settings = Settings(atif_img="localhost/evalhub/community-atif:dev", adapters="atif")
+    with images.staged_module_context(settings, module, images.unmapped_adapter_overrides(settings)) as context:
+        assert context != module
+        template = context / "config" / "manifests-template"
+        for overlay in ("base", "overlays/odh"):
+            params = (template / overlay / "params.env").read_text()
+            assert "evalhub-provider-atif-image=localhost/evalhub/community-atif:dev" in params
+            # a key the override does not name keeps the value the checkout has
+            assert "trustyaiServiceImage=quay.io/trustyai/trustyai-service:latest" in params
+        config = (template / "configmaps" / "evalhub" / "provider-atif.yaml").read_text()
+        assert "image_pull_policy: if_not_present" in config
+        # the image is only in the engine's store, so the node has to supply it
+        assert "image_pull_policy: always" not in config
+    assert (
+        "quay.io/evalhub/community-atif:v1.1.0-alpha.1"
+        in (module / "config" / "manifests-template" / "base" / "params.env").read_text()
+    )
+    assert not context.exists()
+
+
+def test_a_pushed_image_keeps_its_pull_policy(tmp_path):
+    """A reference the local registry serves is pulled as before; nothing has to change."""
+    module = module_tree(tmp_path)
+    settings = Settings(atif_img="localhost:5005/evalhub/community-atif:dev", adapters="atif")
+    with images.staged_module_context(settings, module, images.unmapped_adapter_overrides(settings)) as context:
+        config = context / "config" / "manifests-template" / "configmaps" / "evalhub" / "provider-atif.yaml"
+        assert "image_pull_policy: always" in config.read_text()
+
+
+def test_a_template_without_the_key_is_refused(tmp_path):
+    """A template that no longer carries the key is a shape change, not a silent no-op."""
+    module = tmp_path / "trustyai-operator-module"
+    params = module / "config" / "manifests-template" / "base" / "params.env"
+    params.parent.mkdir(parents=True)
+    params.write_text("trustyaiServiceImage=quay.io/trustyai/trustyai-service:latest\n")
+    (module / "Dockerfile").write_text("FROM scratch\n")
+    settings = Settings(atif_img="localhost/evalhub/community-atif:dev", adapters="atif")
+    with pytest.raises(HarnessError, match="carries evalhub-provider-atif-image"):
+        with images.staged_module_context(settings, module, images.unmapped_adapter_overrides(settings)):
+            pass
+
+
+def test_the_load_path_builds_the_adapter_image_it_was_given(monkeypatch):
+    """`--atif-img X up` is one step: the adapter is built here, not only pushed by images-all."""
+    built: list[tuple[str, str]] = []
+    monkeypatch.setattr(images, "build_operators", lambda settings: None)
+    monkeypatch.setattr(images, "build_adapter", lambda settings, adapter, image: built.append((adapter, image)))
+    images.build_load_path_images(Settings(adapters="atif", atif_img="localhost/evalhub/community-atif:dev"))
+    assert built == [("atif", "localhost/evalhub/community-atif:dev")]
+
+
+def test_the_load_path_builds_no_adapter_it_was_not_given(monkeypatch):
+    built: list[tuple[str, str]] = []
+    monkeypatch.setattr(images, "build_operators", lambda settings: None)
+    monkeypatch.setattr(images, "build_adapter", lambda settings, adapter, image: built.append((adapter, image)))
+    images.build_load_path_images(Settings(adapters="atif"))
+    assert built == []
+
+
+def test_loading_also_takes_the_adapter_image_the_run_was_given(tmp_path, monkeypatch):
+    loaded: list[str] = []
+    monkeypatch.setattr(images, "image_present", lambda settings, image: True)
+    monkeypatch.setattr(images, "save", lambda settings, image, archive: loaded.append(image))
+    monkeypatch.setattr(images, "run", lambda command, **kwargs: None)
+    settings = Settings(
+        operator_repo=str(tmp_path),
+        operator_arch="single",
+        adapters="atif",
+        atif_img="localhost/evalhub/community-atif:dev",
+    )
+    images.load(settings)
+    assert loaded == [settings.workload_img, "localhost/evalhub/community-atif:dev"]
+
+
+def test_loading_refuses_an_adapter_image_the_engine_does_not_have(monkeypatch):
+    monkeypatch.setattr(images, "image_present", lambda settings, image: not image.endswith("community-atif:dev"))
+    monkeypatch.setattr(images, "save", lambda settings, image, archive: None)
+    monkeypatch.setattr(images, "run", lambda command, **kwargs: None)
+    settings = Settings(operator_arch="single", adapters="atif", atif_img="localhost/evalhub/community-atif:dev")
+    with pytest.raises(HarnessError, match="drop the adapter image flag"):
+        images.load(settings)
+
+
+def test_another_named_image_the_store_has_is_loaded_too(monkeypatch):
+    """`--evalhub-img` and friends are loaded as well, so a locally built operand runs on the node."""
+    loaded: list[str] = []
+    monkeypatch.setattr(images, "image_present", lambda settings, image: True)
+    monkeypatch.setattr(images, "save", lambda settings, image, archive: loaded.append(image))
+    monkeypatch.setattr(images, "run", lambda command, **kwargs: None)
+    settings = Settings(operator_arch="single", evalhub_img="localhost/evalhub/evalhub:dev")
+    images.load(settings)
+    assert loaded == [settings.workload_img, "localhost/evalhub/evalhub:dev"]
+
+
+def test_a_named_image_the_store_lacks_is_left_to_the_cluster(monkeypatch, capsys):
+    """A remote reference is the cluster's business: loading it is not this path's job."""
+    monkeypatch.setattr(images, "image_present", lambda settings, image: image == Settings().workload_img)
+    monkeypatch.setattr(images, "save", lambda settings, image, archive: None)
+    monkeypatch.setattr(images, "run", lambda command, **kwargs: None)
+    settings = Settings(operator_arch="single", mlflow_img="ghcr.io/mlflow/mlflow:v3.1.0")
+    images.load(settings)
+    assert "the cluster will pull it" in capsys.readouterr().err
+
+
+def test_an_unset_image_field_is_not_a_named_image():
+    """trustyai_service_img has a default, so an untouched run must not ask for it."""
+    assert images.named_images(Settings()) == []
+    assert images.named_images(Settings(trustyai_service_img="quay.io/x/y:dev")) == [
+        ("TrustyAI service", "quay.io/x/y:dev")
+    ]

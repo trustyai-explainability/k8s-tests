@@ -18,7 +18,7 @@ from pathlib import Path
 import click
 
 from harness import resources
-from harness.config import Settings
+from harness.config import Settings, is_deployed_record, record_values
 from harness.shell import HarnessError, run
 
 SECTIONS = (
@@ -43,9 +43,12 @@ def section_marker(section: str, settings: Settings) -> str | None:
         case "all":
             return None
         case "adapters":
-            # The ATIF checks are in this selection by marker but are their own, slower
-            # section: they deploy MLflow and a judge before their first job.
-            return f"{adapters} and not atif"
+            # Every adapter check, ATIF included: a section named for the adapters that
+            # silently dropped one would make `-k <adapter>` - the way every other adapter
+            # is narrowed - collect nothing for it. The ATIF checks are the slow ones, so a
+            # run that wants the others pays for `-k 'not atif'`, and `adapters-atif` remains
+            # the way to run that block alone into its own report.
+            return adapters
         case "adapters-atif":
             # The ATIF checks deploy MLflow and a judge, and each job is minutes of a
             # Kind cluster's time, so they are never part of the default run either.
@@ -112,6 +115,20 @@ def _inside(root: Path, token: str) -> str:
     return str(root / token[len(resources.TESTS) + 1 :])
 
 
+def settings_for_run(settings: Settings) -> Settings:
+    """The settings a run collects with, taking images from the record this deployment stamped.
+
+    `up --atif-img X` names an adapter image once: `deploy` records what it brought up, and
+    a later `test` reads it back here, so the section verifies the image the build produced
+    without being told it again. An image the caller names explicitly still wins - the
+    record fills gaps, it does not overrule the command line.
+    """
+    path = settings.images_env_path
+    if is_deployed_record(path):
+        return settings.with_image_record(record_values(path))
+    return settings
+
+
 def run_tests(
     settings: Settings,
     *,
@@ -122,6 +139,7 @@ def run_tests(
     keep_resources: bool,
 ) -> int:
     """Run the selection, leave the resources when asked, and say where the report went."""
+    settings = settings_for_run(settings)
     arguments, target = pytest_arguments(settings, section=section, marker=marker, select=select, report=report)
     settings.with_updates(keep_resources=keep_resources).export()
     result = run(arguments, check=False)
@@ -129,4 +147,4 @@ def run_tests(
     return result.returncode
 
 
-__all__ = ["SECTIONS", "pytest_arguments", "run_tests", "section_marker"]
+__all__ = ["SECTIONS", "pytest_arguments", "run_tests", "section_marker", "settings_for_run"]

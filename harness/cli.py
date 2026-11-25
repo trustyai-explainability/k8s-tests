@@ -157,7 +157,7 @@ def check_operator_repo(settings: Settings) -> None:
 @cli.command()
 @click.pass_obj
 def images(settings: Settings) -> None:
-    """Build the workload and module operator images from OPERATOR_REPO."""
+    """Build the operator images from OPERATOR_REPO, and any adapter image this run names."""
     image_ops.build_load_path_images(settings)
 
 
@@ -192,7 +192,15 @@ def deploy_registry(settings: Settings) -> None:
 @cli.command()
 @click.pass_obj
 def up(settings: Settings) -> None:
-    """Create the cluster, build, load and deploy, and wait for the operators."""
+    """Create the cluster, build, load and deploy, and wait for the operators.
+
+    An adapter image named with `--atif-img` (or any other adapter's image flag) is built
+    from EVALHUB_CONTRIB_REPO and loaded onto the node too, so the load path needs no
+    registry and no separate build step. Any other image the run names - `--evalhub-img`,
+    `--trustyai-service-img`, `--kube-rbac-proxy-img`, `--lmes-img`, `--mlflow-img`,
+    `--emulator-img` - is loaded when the engine's store holds it, and left to the cluster
+    to pull otherwise.
+    """
     image_ops.check_operator_repo(settings)
     cluster_ops.create(settings)
     image_ops.build_load_path_images(settings)

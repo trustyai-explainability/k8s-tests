@@ -20,7 +20,9 @@ from kubernetes.client.exceptions import ApiException
 from harness import arch
 from harness.cluster import kube, kube_result
 from harness.config import (
+    IMAGE_RECORD_VARS,
     IMAGES_ENV_DEPLOYED_MARKER,
+    SETTINGS,
     Settings,
     is_deployed_record,
     record_lines,
@@ -448,10 +450,28 @@ def deploy(settings: Settings, *, next_step: bool = True) -> None:
         # come from the stack bring-up.
         bring_up(settings)
 
-    stamp_record(settings, kept)
+    stamp_record(settings, kept if kept is not None else deployed_record(settings))
     info(f"TrustyAI is deployed in namespace {settings.namespace} ({layout} layout)")
     if next_step:
         info("its operands are created by the tests: k8s-tests test")
+
+
+def deployed_record(settings: Settings) -> list[str]:
+    """The images this deployment runs, as record lines, for a run that built loads instead of pushes.
+
+    `images-all` writes the record while it pushes; the load path has no registry, so the
+    record is written from the resolved settings here instead. Either way the file describes
+    what is running, which is what lets `test` pick up an adapter image without being told
+    it a second time.
+    """
+    by_envvar = {setting.envvar: setting.field for setting in SETTINGS}
+    lines: list[str] = []
+    for variable in IMAGE_RECORD_VARS:
+        field = by_envvar.get(variable)
+        value = getattr(settings, field, "") if field else ""
+        if value:
+            lines.append(f"{variable}={value}")
+    return lines
 
 
 def keep_used_images(settings: Settings) -> list[str] | None:
