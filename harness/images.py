@@ -8,8 +8,12 @@ recording the references in IMAGES_ENV_FILE for `deploy-registry` to read back.
 from __future__ import annotations
 
 import filecmp
+import re
 import shutil
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import fields as dataclass_fields
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,6 +34,136 @@ from harness.engine import (
 from harness.shell import HarnessError, environment, info, output, run, warn
 
 LMES_DOCKERFILE = "Dockerfile.lmes-job"
+
+#: The params.env key each provider image is rendered from. A provider the module operator
+#: resolves from a RELATED_IMAGE_* variable needs no entry: the platform variable already
+#: reaches it. A provider without one is rendered from the template baked into the module
+#: image, so its value is fixed when that image is built - see `staged_module_context`.
+PROVIDER_PARAMS_KEYS = {"atif": "evalhub-provider-atif-image"}
+
+
+def provider_params_key(adapter: str) -> str:
+    """The params.env key a provider image is rendered from."""
+    return PROVIDER_PARAMS_KEYS.get(adapter, f"evalhub-provider-{adapter.replace('_', '-')}-image")
+
+
+#: Images a run can name that this path does not build. They are loaded when the engine's
+#: store holds them, so a locally built or pulled operand runs on the node as named, and left
+#: to the cluster otherwise - a remote reference needs no help from here. The default of each
+#: field is read from `Settings`, so an unset field is not mistaken for a named image.
+NAMED_IMAGE_FIELDS = {
+    "evalhub_img": "EvalHub",
+    "trustyai_service_img": "TrustyAI service",
+    "kube_rbac_proxy_img": "kube-rbac-proxy",
+    "lmes_img": "lm_evaluation_harness adapter",
+    "mlflow_img": "MLflow tracking server",
+    "emulator_img": "LLM emulator",
+}
+
+_SETTINGS_DEFAULTS = {field.name: field.default for field in dataclass_fields(Settings)}
+
+
+def named_images(settings: Settings) -> list[tuple[str, str]]:
+    """The other images this run named, as (label, image), skipping any left at its default."""
+    named: list[tuple[str, str]] = []
+    for field, label in NAMED_IMAGE_FIELDS.items():
+        image = getattr(settings, field, "") or ""
+        if image and image != _SETTINGS_DEFAULTS.get(field):
+            named.append((label, image))
+    return named
+
+
+def unmapped_adapter_overrides(settings: Settings) -> list[tuple[str, str, str]]:
+    """The selected adapters whose image has no RELATED_IMAGE_* variable, with that image.
+
+    Each is (params.env key, adapter, image). An adapter the module operator already
+    resolves from a platform variable is skipped: setting the variable is enough, and
+    rebuilding the module image for it would be work with nothing to show.
+    """
+    from harness.deploy import RELATED_IMAGES
+
+    mapped = {field for _, field, _ in RELATED_IMAGES}
+    overrides: list[tuple[str, str, str]] = []
+    for adapter in registry.selected_adapters(settings):
+        field = f"{adapter.replace('-', '_')}_img"
+        if field in mapped:
+            continue
+        image = getattr(settings, field, "") or ""
+        if image:
+            overrides.append((provider_params_key(adapter), adapter, image))
+    return overrides
+
+
+def _rewrite_params(path: Path, values: dict[str, str]) -> bool:
+    """Point the keys `values` names at their image, leaving every other line alone."""
+    if not path.is_file():
+        return False
+    lines = path.read_text().splitlines()
+    changed = False
+    rewritten: list[str] = []
+    for line in lines:
+        key, separator, _ = line.partition("=")
+        if separator and key in values:
+            line = f"{key}={values[key]}"
+            changed = True
+        rewritten.append(line)
+    if changed:
+        path.write_text("\n".join(rewritten) + "\n")
+    return changed
+
+
+def _relax_pull_policy(path: Path) -> bool:
+    """Let a provider use the image the node already holds.
+
+    A provider that ships `image_pull_policy: always` ignores a locally loaded image and
+    asks a registry for a tag that may exist only in the engine's store, so a build that
+    was loaded rather than pushed could never run.
+    """
+    if not path.is_file():
+        return False
+    text = path.read_text()
+    rewritten = re.sub(r"(?m)^(\s*)image_pull_policy:\s*always\s*$", r"\1image_pull_policy: if_not_present", text)
+    if rewritten == text:
+        return False
+    path.write_text(rewritten)
+    return True
+
+
+@contextmanager
+def staged_module_context(settings: Settings, module: Path, overrides: list[tuple[str, str, str]]) -> Iterator[Path]:
+    """Stage the module build context in a temp directory with the providers pointed at this run's images.
+
+    The module image bakes `config/manifests-template`, and the module operator rewrites
+    `params.env` on every reconcile only for the keys its own RELATED_IMAGE_* map names. A
+    provider outside that map is fixed at build time instead: the staged copy carries the
+    image, so the operator renders it from the start, it survives a restart, and nothing
+    has to be edited on the running cluster or in the checkout.
+    """
+    if not overrides:
+        yield module
+        return
+    values = {key: image for key, _, image in overrides}
+    with tempfile.TemporaryDirectory(prefix="trustyai-module-") as staging:
+        staged = Path(staging) / MODULE_DIR
+        shutil.copytree(module, staged)
+        template = staged / "config" / "manifests-template"
+        touched = [
+            path
+            for path in (template / "base" / "params.env", *sorted(template.glob("overlays/*/params.env")))
+            if _rewrite_params(path, values)
+        ]
+        if not touched:
+            raise HarnessError(
+                f"no params.env under {template} carries {', '.join(values)}; "
+                "the module template changed shape, so the provider image cannot be staged"
+            )
+        for _, adapter, image in overrides:
+            # A reference the local registry serves is pulled as before; one that exists
+            # only in the engine's store has to be found on the node.
+            if not image.startswith(f"{settings.registry_host}/"):
+                _relax_pull_policy(template / "configmaps" / "evalhub" / f"provider-{adapter}.yaml")
+        info(f"staged {MODULE_DIR} for {', '.join(f'{key}={image}' for key, _, image in overrides)}")
+        yield staged
 
 
 def check_operator_repo(settings: Settings) -> None:
@@ -91,24 +225,46 @@ def build_operators(settings: Settings) -> None:
         "--build-arg",
         f"CI_CONTAINER_VERSION={settings.tag}",
     )
-    build(settings, settings.module_img, module, module / "Dockerfile", "--build-arg", f"VERSION={settings.tag}")
+    overrides = unmapped_adapter_overrides(settings)
+    with staged_module_context(settings, module, overrides) as context:
+        build(settings, settings.module_img, context, context / "Dockerfile", "--build-arg", f"VERSION={settings.tag}")
     info(f"built {settings.workload_img} and {settings.module_img}")
 
 
+def loadable_adapter_images(settings: Settings) -> list[tuple[str, str]]:
+    """The adapter images this run was handed, as (adapter, image).
+
+    `images-all` builds every adapter and pushes it to the registry, which `deploy-registry`
+    reads back. The load path has no registry, so an adapter image named on the command line
+    is the one to build and put on the node - that is what makes `--atif-img X up` one step.
+    """
+    named: list[tuple[str, str]] = []
+    for adapter in registry.selected_adapters(settings):
+        image = getattr(settings, f"{adapter.replace('-', '_')}_img", "") or ""
+        if image:
+            named.append((adapter, image))
+    return named
+
+
 def build_load_path_images(settings: Settings) -> None:
-    """Build the operator images and clear the record their rebuild invalidates."""
+    """Build the images the load path deploys: the operators, and any adapter image this run names."""
     if settings.images_env_path.exists():
         info(f"removing {settings.images_env_path}: it records references this build replaces")
         settings.images_env_path.unlink()
     build_operators(settings)
+    for adapter, image in loadable_adapter_images(settings):
+        build_adapter(settings, adapter, image)
 
 
 def load(settings: Settings) -> None:
-    """Load the built operator images into the Kind cluster.
+    """Load the built images into the Kind cluster.
 
     `kind load docker-image` shells out to docker even on the podman provider, so export
     each image and hand Kind the archive. One archive per image: `podman save` collapses
     several into a single manifest entry and would load the first under every tag.
+
+    The operator images come from the layout; an adapter image comes from the flag that
+    named it, because the load path has no registry to hold it.
 
     How many images there are is the layout's answer, and the layout comes from the
     checkout. With neither a checkout nor a declared layout the paths below resolve
@@ -125,6 +281,21 @@ def load(settings: Settings) -> None:
     missing = [image for image in built if not image_present(settings, image)]
     if missing:
         raise HarnessError(f"{', '.join(missing)} is not in the engine's store; run 'k8s-tests images' first")
+    adapters = loadable_adapter_images(settings)
+    missing_adapters = [image for _, image in adapters if not image_present(settings, image)]
+    if missing_adapters:
+        raise HarnessError(
+            f"{', '.join(missing_adapters)} is not in the engine's store; run "
+            "'k8s-tests --adapters <name> images' first, or drop the adapter image flag"
+        )
+    built += [image for _, image in adapters]
+    for label, image in named_images(settings):
+        if image in built:
+            continue
+        if image_present(settings, image):
+            built.append(image)
+        else:
+            warn(f"{label} image {image} is not in the engine's store; the cluster will pull it")
 
     kind_env = environment({"KIND_EXPERIMENTAL_PROVIDER": settings.kind_provider})
     with tempfile.TemporaryDirectory(prefix="k8s-tests-images-") as workdir:
@@ -133,7 +304,7 @@ def load(settings: Settings) -> None:
             save(settings, image, archive)
             info(f"loading {image} into Kind cluster {settings.kind_cluster}")
             run([settings.kind, "load", "image-archive", "--name", settings.kind_cluster, archive], env=kind_env)
-    info(f"loaded {len(built)} operator image(s) into {settings.kind_cluster}")
+    info(f"loaded {len(built)} image(s) into {settings.kind_cluster}")
 
 
 def require_cluster(settings: Settings) -> None:
