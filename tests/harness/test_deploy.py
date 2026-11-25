@@ -334,3 +334,18 @@ def test_a_leftover_serving_crd_is_reported(tmp_path, monkeypatch):
 
     deploy_module.apply_external_crds(Settings(operator_arch="modular", release="3.7"))
     assert warnings and "already installed" in warnings[0]
+
+
+def test_the_record_names_the_images_that_run():
+    """`deploy` writes what it brought up, so `test` can read an adapter image back."""
+    settings = Settings(
+        workload_img="localhost/trustyai-service-operator:dev",
+        module_img="localhost/trustyai-operator-module:dev",
+        atif_img="localhost/evalhub/community-atif:dev",
+    )
+    lines = deploy.deployed_record(settings)
+    assert "WORKLOAD_IMG=localhost/trustyai-service-operator:dev" in lines
+    assert "MODULE_IMG=localhost/trustyai-operator-module:dev" in lines
+    assert "ATIF_IMG=localhost/evalhub/community-atif:dev" in lines
+    # an image the run did not name is not recorded as if it were in use
+    assert not any(line.startswith("LMES_IMG=") for line in lines)
