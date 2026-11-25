@@ -647,15 +647,37 @@ the experiment through the job's `experiment.name`. Artifacts are read back over
 forwarded port, through the same artifact API the SDK writes to.
 
 `ATIF_IMG` says which adapter image the section is testing. It cannot be changed on a
-running cluster: the provider ConfigMaps are rendered into the operator image from
-`config/overlays/*/params.env`, and the operator re-applies them within about thirty
-seconds, so a patch to the ConfigMap is reverted - and unlike inspect and lighteval,
-`evalhub-provider-atif-image` has no `RELATED_IMAGE_*` resolver key. Set that key in
-the operator checkout before `k8s-tests up-registry`, which is what
-`run-atif-section.sh` in the NemoGym notes directory does (it restores the file
-afterwards). The fixture then verifies that the provider really runs that image and
-fails with the remediation rather than quietly exercising the pin;
-`ATIF_ALLOW_PINNED_IMAGE=1` tests the pin on purpose.
+running cluster: the provider ConfigMaps are rendered from the template baked into the
+module operator image (`config/manifests-template`), and the operator re-applies them on
+every reconcile, so a patch to the ConfigMap is reverted - and unlike inspect and
+lighteval, `evalhub-provider-atif-image` has no `RELATED_IMAGE_*` variable for the
+platform to fill. The harness therefore fixes the value when it builds that image:
+setting `ATIF_IMG` for any command that builds and deploys stages a patched copy of
+`trustyai-operator-module` in a temp directory, rewrites `params.env` (and the provider's
+`image_pull_policy`, when the image is one you loaded rather than pushed) and builds from
+it. Nothing is written to your checkout and nothing is edited on the cluster, and the
+value survives a restart because it is part of the image the operator starts from. The
+fixture then verifies that the provider really runs that image and fails with the
+remediation rather than quietly exercising the pin; `ATIF_ALLOW_PINNED_IMAGE=1` tests
+the pin on purpose.
+
+An adapter whose image the module operator already resolves from a `RELATED_IMAGE_*`
+variable is left alone: for those, setting the variable is the override and there is
+nothing to stage.
+
+On the load path the adapter image itself is part of the run: naming one (`--atif-img`,
+`--inspect-img`, ...) makes `up` build it from `EVALHUB_CONTRIB_REPO` and load it onto the
+node alongside the operators, so no registry and no separate `podman build` / `kind load`
+is involved. `images` and `load` do the same two halves on their own. Any other image a run
+names (`--evalhub-img`, `--trustyai-service-img`, `--kube-rbac-proxy-img`, `--lmes-img`,
+`--mlflow-img`, `--emulator-img`) is loaded when the engine's store holds it, and left for
+the cluster to pull when it does not - a remote reference needs no help from here.
+
+The image is named once. `deploy` writes what it brought up into `reports/images.env` and
+stamps it, and `test` fills the images it did not name from that record - so
+`up --atif-img X` followed by a plain `test --section adapters-atif` checks the image that
+build produced, rather than the operator's pin. Naming an image on `test` still wins over
+the record, which is what makes testing a different image deliberate.
 
 Two things this section has to work around on Kind, both of which are deployment
 facts rather than adapter behaviour. Its instance is created without a provider list
@@ -677,12 +699,16 @@ crash-loops on its cache sync, which makes every check here time out. `run-atif-
 builds from the reference checkout for that reason; a checkout that still watches the kind
 needs `--serving-crd always`.
 
-The section carries `evalhub`, `adapters` and `atif`: `atif` selects it, and
-`--section adapters` leaves it out because it deploys more than a benchmark and runs
-seven jobs. It is slow - each job pulls the adapter image, runs judge calls and writes
-to MLflow - and it is opt-in only:
+The section carries `evalhub`, `adapters` and `atif`. `atif` selects it on its own, into
+its own report; `--section adapters` includes it with the other adapters, so narrowing with
+`-k atif` reaches it the way `-k <adapter>` reaches every other adapter. A run that wants
+the adapters without the slow block narrows the other way: `--pytest-args "-k 'not atif'"`.
+It is slow - each job pulls the adapter image, runs judge calls and writes to MLflow - and
+it is opt-in only:
 
 ```sh
+k8s-tests --adapters atif --atif-img localhost/evalhub/community-atif:dev up   # build + load it into Kind, no registry
+k8s-tests test --section adapters-atif                              # reads that image back from the record
 k8s-tests --adapters atif images-all && k8s-tests deploy-registry   # build and push this adapter, recording ATIF_IMG
 k8s-tests test --section adapters-atif                              # only this section, into reports/adapters-atif.html
 k8s-tests test --select '-m atif' --keep-resources                  # leave the jobs and their pods behind
