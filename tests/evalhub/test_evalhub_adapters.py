@@ -1,7 +1,7 @@
 """Checks for the EvalHub adapters: the section that runs real benchmarks.
 
-Each job here hands one benchmark of the `lm_evaluation_harness` provider to its
-adapter through the EvalHub API, against the LLM emulator the fixtures deploy or,
+Each job here hands one benchmark of a provider to its adapter through the
+EvalHub API, against the LLM emulator the fixtures deploy or,
 when `MODEL_URL` is set, a real endpoint, waits for the adapter to finish in the
 cluster, and reads the result back. `BENCHMARKS` is what the section covers; a new
 benchmark is one entry there, and every check below then runs once for it.
@@ -34,6 +34,7 @@ LOGGER = logging.getLogger(__name__)
 pytestmark = [pytest.mark.evalhub, pytest.mark.adapters]
 
 LM_EVAL_PROVIDER = "lm_evaluation_harness"
+GARAK_PROVIDER = "garak"
 # One example: enough for the harness to score, small enough for a Kind cluster.
 DEFAULT_NUM_EXAMPLES = 1
 # Longer than the harness smoke job's budget: a cold run pulls the adapter image
@@ -55,13 +56,18 @@ class Benchmark:
 
 # ethics_cm is the commonsense split of hendrycks/ethics in lm-evaluation-harness,
 # which the provider config scores on `acc`.
-BENCHMARKS: tuple[Benchmark, ...] = (Benchmark(id="ethics_cm", primary_metric="acc"),)
+# garak's `quick` is one DAN probe scored by string-matching detectors, so the job
+# downloads nothing. It runs the image the operator pins unless GARAK_IMG names another.
+BENCHMARKS: tuple[Benchmark, ...] = (
+    Benchmark(id="ethics_cm", primary_metric="acc"),
+    Benchmark(id="quick", provider_id=GARAK_PROVIDER, primary_metric="attack_success_rate"),
+)
 
 
 def job_payload(benchmark: Benchmark, model: ModelEndpoint, credentials_secret: str | None) -> dict[str, Any]:
     """The job body a user would submit for one benchmark against the model."""
     payload: dict[str, Any] = {
-        "name": f"model-{benchmark.id}",
+        "name": f"model-{benchmark.provider_id}-{benchmark.id}",
         "model": {
             "url": model.url,
             "name": model.name,
@@ -79,7 +85,9 @@ def job_payload(benchmark: Benchmark, model: ModelEndpoint, credentials_secret: 
     return payload
 
 
-@pytest.fixture(scope="module", params=BENCHMARKS, ids=[benchmark.id for benchmark in BENCHMARKS])
+@pytest.fixture(
+    scope="module", params=BENCHMARKS, ids=[f"{benchmark.provider_id}-{benchmark.id}" for benchmark in BENCHMARKS]
+)
 def benchmark(request: pytest.FixtureRequest) -> Benchmark:
     """The benchmark under test; every check runs once per entry in BENCHMARKS."""
     return request.param

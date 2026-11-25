@@ -67,6 +67,7 @@ RELATED_IMAGES = (
     ("RELATED_IMAGE_ODH_TA_LMES_JOB_IMAGE", "lmes_img", "lm_evaluation_harness adapter"),
     ("RELATED_IMAGE_ODH_EVAL_HUB_INSPECTAI_IMAGE", "inspect_img", "Inspect AI adapter"),
     ("RELATED_IMAGE_ODH_EVAL_HUB_LIGHTEVAL_IMAGE", "lighteval_img", "LightEval adapter"),
+    ("RELATED_IMAGE_ODH_TRUSTYAI_GARAK_LLS_PROVIDER_DSP_IMAGE", "garak_img", "garak adapter"),
 )
 
 
@@ -228,6 +229,8 @@ def operand_images(settings: Settings) -> dict[str, str]:
         images["kube-rbac-proxy"] = settings.kube_rbac_proxy_img
     if settings.lmes_img:
         images["lmes-pod-image"] = settings.lmes_img
+    if settings.garak_img:
+        images["garak-provider-image"] = settings.garak_img
     return images
 
 
