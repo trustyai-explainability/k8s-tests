@@ -566,10 +566,11 @@ one per entry in its table.
 The job runs in the cluster: the adapter container calls the model through the
 EvalHub sidecar, which injects the credential. The checks assert the job reaches
 `completed`, that `results.benchmarks[0]` carries the benchmark id, provider and
-numeric metrics, and, when the model is the emulator, that it saw the tenant
-Secret's token on a `/v1` path. A real endpoint does not report what it
-authenticated, so that last check skips rather than pretending the job's own
-verdict proves the credential arrived. The first run of the day is the slow one -
+numeric metrics, and that the Kubernetes Job uses the sidecar image from the
+EvalHub Deployment's mounted configuration. When the model is the emulator,
+the checks also assert it saw the tenant Secret's token on a `/v1` path. A real
+endpoint does not report what it authenticated, so that last check skips rather
+than treating job completion as proof that the credential arrived. The first run of the day is the slow one -
 the adapter image has to be pulled and the job scheduled (about six minutes on a
 cold Kind node); afterwards the run is about a minute. It is marked `benchmark`,
 so it can be filtered out:
@@ -577,6 +578,17 @@ so it can be filtered out:
 ```sh
 k8s-tests test --pytest-args "-m 'not benchmark'"
 ```
+
+## EvalHub post-processor image
+
+Set `evalHubPostProcessorImage` in the operator's `config/base/params.env` and
+selected platform overlay's `params.env`, then sync the module manifest template
+with `make sync-trustyai-module-manifests` before building the operator. To opt in,
+set `EVALHUB_TEST_POST_PROCESSOR_IMAGE` to the same reference and select
+`tests/evalhub/test_evalhub_post_processing.py`. The check requires an EvalHub
+build with the standalone post-processing API. It verifies the image in both the
+server Deployment and the generated Job; it does not pull the image or run the
+confidence-interval computation.
 
 ## EvalHub adapters
 
