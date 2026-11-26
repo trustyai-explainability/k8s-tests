@@ -356,12 +356,22 @@ def build_evalhub(settings: Settings, image: str) -> None:
     build(settings, image, repo, containerfile, *args)
 
 
+#: The file the operator's NeMo Guardrails server image is built from. The checkout's plain
+#: `Dockerfile` is the upstream library's image, which serves `/config` and starts a different
+#: entrypoint, so the operator's `/app/config/<name>` contract is not there.
+NEMO_CONTAINERFILE = "Dockerfile.server"
+
+
 def build_nemo(settings: Settings, image: str) -> None:
-    """Build the NeMo Guardrails server image from the checkout's own Dockerfile."""
+    """Build the server image the operator deploys, from NEMO_REPO's `Dockerfile.server`."""
     repo = require_checkout(settings.nemo_repo, "NEMO_REPO")
-    containerfile = repo / "Dockerfile"
+    containerfile = repo / NEMO_CONTAINERFILE
     if not containerfile.is_file():
-        raise HarnessError(f"missing {containerfile}; set NEMO_REPO")
+        raise HarnessError(
+            f"missing {containerfile}: NEMO_REPO must be a checkout that has {NEMO_CONTAINERFILE}, the "
+            "image the operator deploys. The upstream NVIDIA Dockerfile serves a different config root and "
+            "would not satisfy the operator's contract."
+        )
     build(settings, image, repo, containerfile)
 
 
@@ -404,6 +414,15 @@ def images_all(settings: Settings) -> None:
     require_operator_repo(settings)
     if settings.nemo_repo:
         require_checkout(settings.nemo_repo, "NEMO_REPO")
+        if "nemo_img" in settings.explicit:
+            # images-all pushes the server under its own registry reference and records that. A
+            # NEMO_IMG named here would be deployed in its place while nothing built it, so the
+            # pairing is refused before anything is built. `up` is the route that builds under NEMO_IMG.
+            raise HarnessError(
+                "NEMO_IMG cannot be named with NEMO_REPO under images-all: it builds the server and pushes it "
+                "to the local registry under its own reference. Drop NEMO_IMG, or use 'k8s-tests up', which "
+                "builds under the name it is given."
+            )
     if settings.skip_build and settings.remove_after_push:
         raise HarnessError(
             "SKIP_BUILD reuses the images in the local store, so it cannot be combined with REMOVE_AFTER_PUSH"

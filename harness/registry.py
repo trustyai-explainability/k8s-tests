@@ -76,14 +76,23 @@ def adapter_context(adapter: str) -> str:
     return ADAPTER_CONTEXTS.get(adapter, f"adapters/{adapter}")
 
 
+def requested_adapters(settings: Settings) -> list[str]:
+    """The tokens ADAPTERS names, the one place that reads them and enforces the rules between them.
+
+    Every reader of ADAPTERS goes through here, so no caller can apply a rule the others do not.
+    `none` builds no adapter at all, for a run whose checks need only the operators and the image
+    it was given; it stands alone, because naming it beside others is a contradiction.
+    """
+    wanted = settings.adapters.replace(",", " ").split() or ["all"]
+    if "none" in wanted and wanted != ["none"]:
+        raise HarnessError("ADAPTERS=none stands alone; it cannot be combined with other adapters")
+    return wanted
+
+
 def selected_adapters(settings: Settings) -> list[str]:
     """The adapters ADAPTERS asks for, checked against the ones that exist."""
-    wanted = settings.adapters.replace(",", " ").split() or ["all"]
-    # `none` builds no adapter at all, for a run whose checks need only the operators and
-    # the image it was given; it stands alone, because naming it beside others is a contradiction.
-    if "none" in wanted:
-        if wanted != ["none"]:
-            raise HarnessError("ADAPTERS=none stands alone; it cannot be combined with other adapters")
+    wanted = requested_adapters(settings)
+    if wanted == ["none"]:
         return []
     for item in wanted:
         if item not in ("all", "lmes") and item not in CONTRIB_ADAPTERS:
@@ -96,7 +105,7 @@ def selected_adapters(settings: Settings) -> list[str]:
 
 
 def builds_lmes(settings: Settings) -> bool:
-    wanted = settings.adapters.replace(",", " ").split()
+    wanted = requested_adapters(settings)
     return "all" in wanted or "lmes" in wanted
 
 

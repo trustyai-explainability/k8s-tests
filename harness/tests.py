@@ -42,7 +42,9 @@ def section_marker(section: str, settings: Settings) -> str | None:
     adapters = settings.adapters_marker
     match section:
         case "standard":
-            return f"not {adapters} and not image_pull_grace"
+            # The NeMo section pulls the operator's server image, about 2.7 GB, so it runs as a section of
+            # its own, like the grace case, and the default run does not pay for that pull.
+            return f"not {adapters} and not image_pull_grace and not nemo"
         case "all":
             return None
         case "adapters":

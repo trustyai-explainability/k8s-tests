@@ -12,11 +12,11 @@ from harness.shell import HarnessError
 @pytest.mark.parametrize(
     ("section", "marker"),
     [
-        ("standard", "not adapters"),
+        ("standard", "not adapters and not image_pull_grace and not nemo"),
         ("all", None),
         ("adapters", "adapters"),
         ("adapters-atif", "atif"),
-        ("evalhub", "evalhub and not adapters"),
+        ("evalhub", "evalhub and not adapters and not image_pull_grace"),
         ("generation", "evalhub and generation"),
         ("isvc-free", "isvc_free"),
         ("lmeval", "lmeval"),
@@ -35,7 +35,7 @@ def test_an_unknown_section_is_an_error():
 def test_the_standard_section_writes_the_main_report():
     arguments, report = tests.pytest_arguments(Settings(), section="standard", marker=None, select=(), report=None)
     assert report == Settings().report_path
-    assert "-m" in arguments and "not adapters" in arguments
+    assert "-m" in arguments and "not adapters and not image_pull_grace and not nemo" in arguments
     assert f"--html={Settings().report_path}" in arguments
     assert "--self-contained-html" in arguments
 

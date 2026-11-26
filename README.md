@@ -287,7 +287,7 @@ Every one is a flag and an environment variable; `k8s-tests --help` lists them a
 | `REGISTRY_PORT` | `5005` | Host port of the registry `images-all` starts on the `kind` network |
 | `EVALHUB_REPO` | `../eval-hub` | Checkout `images-all` builds the EvalHub service image from |
 | `EVALHUB_CONTRIB_REPO` | `../eval-hub-contrib` | Checkout `images-all` builds the adapter images from |
-| `NEMO_REPO` | *(empty)* | NeMo-Guardrails checkout the server image is built from (its `Dockerfile`) by `up` (tagged `NEMO_IMG`) and by `images-all`; empty builds none |
+| `NEMO_REPO` | *(empty)* | NeMo-Guardrails checkout the server image is built from (its `Dockerfile.server`) by `up` (tagged `NEMO_IMG`) and by `images-all`; empty builds none |
 | `LMES_REPO` | `../lm-evaluation-harness` | Checkout `images-all` builds `community-lmes` from (`Dockerfile.lmes-job`) |
 | `ADAPTERS` | `all` | `all`, `lmes`, `none`, or a comma-separated list of eval-hub-contrib adapter directories; `none` builds no adapter and stands alone |
 | `LMES_IMG` / `INSPECT_IMG` / `LIGHTEVAL_IMG` | *(empty)* | Adapter image overrides passed through the module operator (`RELATED_IMAGE_ODH_*`) |
@@ -811,8 +811,11 @@ operator promises for it:
 The last two are separate checks, so a failure says which side of the contract broke: a
 missing mount is the operator, and a mount the server does not list is the image.
 
-`NEMO_REPO` builds the server image from a NeMo-Guardrails checkout's `Dockerfile`, and it
-is opt-in because that build is large. Without it, the operator's own pin runs. `NEMO_IMG`
+`NEMO_REPO` builds the server image from a NeMo-Guardrails checkout's `Dockerfile.server`, the
+file the operator's own image is built from. The checkout's plain `Dockerfile` is the upstream
+library's image, which serves `/config` and would not satisfy the operator's contract, so a
+checkout without `Dockerfile.server` is refused. The build is opt-in because it is large. Without
+`NEMO_REPO` the operator's own pin runs. `NEMO_IMG`
 names the image: `up` builds it under that name and loads it onto the Kind nodes, so the
 deploy runs exactly what was built. No registry is needed for this. The operator's NeMo
 Deployment sets no pull policy, and a `dev` tag defaults to `IfNotPresent`, so the loaded
@@ -824,10 +827,14 @@ NEMO_IMG=localhost/nemo-guardrails-server:dev k8s-tests test --section nemo   # 
 ```
 
 `images-all` (and `up-registry`) also build the server from `NEMO_REPO` and push it to the
-local registry, for a run that deploys from the registry instead.
+local registry, for a run that deploys from the registry instead. There `NEMO_IMG` must not be
+named: `images-all` records the reference it pushed, and `deploy-registry` refuses a named
+`NEMO_IMG` that differs from it, so the section can only ever check the image that was built.
 
-The section carries the `nemo` marker and is part of the default run, as the EvalHub
-sections are.
+The section carries the `nemo` marker. It is its own section and not part of the default run,
+as `image-pull-grace` is: the operator's server image is about 2.7 GB compressed, and the
+first rollout waits up to 900 seconds for that pull. The checks are gated on the release that
+first ships the component (3.2), and an install that leaves `nemoGuardrails` off skips them.
 
 ## TrustyAI service
 

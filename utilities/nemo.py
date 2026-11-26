@@ -21,7 +21,7 @@ from kubernetes.dynamic import DynamicClient
 from kubernetes.dynamic.exceptions import NotFoundError
 
 from utilities.kube import wait_for_deployment_available
-from utilities.trustyai import deployment_exists
+from utilities.trustyai import crd_exists, deployment_exists
 
 LOGGER = logging.getLogger(__name__)
 
@@ -45,8 +45,23 @@ NEMO_FORWARDED_PORT = 18000
 # and does not load them, so no model has to be reachable for the check.
 NEMO_CONFIG_YAML = "models: []\n"
 
-DEPLOYMENT_TIMEOUT = 300
+# The first rollout pulls the operator's server image, about 2.7 GB compressed, on the Kind node's
+# clock, so the wait covers that pull as well as the start.
+DEPLOYMENT_TIMEOUT = 900
 DEPLOYMENT_POLL_SECONDS = 5
+
+
+def skip_unless_served(api_client: client.ApiClient, trustyai_module: dict[str, Any] | None) -> None:
+    """Skip when this install does not run a NeMo Guardrails server, so the checks are not applicable.
+
+    Used by the fixture and the checks alike, so an install that has the CRD but leaves the service
+    off is recorded as not applicable rather than as a failure of the section.
+    """
+    if not crd_exists(api_client, NEMO_CRD_NAME):
+        pytest.skip(f"{NEMO_CRD_NAME} is not installed, so this install serves no NeMo Guardrails server")
+    enabled = ((trustyai_module or {}).get("spec") or {}).get("enabledServices") or {}
+    if enabled and not enabled.get("nemoGuardrails", True):
+        pytest.skip("the module resource does not enable nemoGuardrails, so no NemoGuardrails is reconciled")
 
 
 def nemo_config_map(namespace: str) -> client.V1ConfigMap:

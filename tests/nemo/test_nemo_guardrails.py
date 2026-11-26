@@ -4,6 +4,9 @@ The checks create the resource in a namespace of their own, with one configurati
 hold the operator to what its code promises: the Deployment runs the server image the run
 was given, the configuration is mounted where the server reads it, and the server lists it.
 The last two are separate checks, so a failure says which side of that contract broke.
+
+The component first ships in the 3.2 release, so an older `--release` is not applicable, and
+an install that leaves the service off is skipped rather than failed (see `skip_unless_served`).
 """
 
 from __future__ import annotations
@@ -26,25 +29,42 @@ from utilities.nemo import (
     delete_nemo,
     served_configurations,
     server_container,
+    skip_unless_served,
     wait_for_nemo_deployment,
 )
 from utilities.portforward import allocate_local_ports, port_forward, release_local_ports
+from utilities.release import release
 from utilities.trustyai import crd_exists, expected_image_from_env
 
 LOGGER = logging.getLogger(__name__)
 
-pytestmark = [pytest.mark.nemo]
+# The release whose operator ships the NemoGuardrails component: its CRD, its controller and the
+# `nemo-guardrails-image` key. Earlier releases have none of them.
+NEMO_MIN_VERSION = "3.2"
+
+pytestmark = [
+    pytest.mark.nemo,
+    pytest.mark.usefixtures("trustyai_module"),
+    release(min=NEMO_MIN_VERSION),
+]
 
 
 @pytest.fixture(scope="module")
 def nemo_namespace(
     request: pytest.FixtureRequest,
     workload_namespaces,
+    api_client: client.ApiClient,
     core_client: client.CoreV1Api,
     apps_client: client.AppsV1Api,
     dynamic_client: DynamicClient,
+    trustyai_module: dict | None,
 ) -> str:
-    """A namespace holding a NemoGuardrails resource, rolled out before the first check."""
+    """A namespace holding a NemoGuardrails resource, rolled out before the first check.
+
+    Nothing is created where the install does not serve NeMo: the resource would be accepted and
+    never reconciled, which is a property of that install rather than a failure of this one.
+    """
+    skip_unless_served(api_client, trustyai_module)
     namespace = workload_namespaces(request, prefix="nemo-guardrails")
 
     def remove_resource() -> None:
@@ -60,7 +80,8 @@ def nemo_namespace(
     return namespace
 
 
-def test_the_resource_definition_is_installed(api_client: client.ApiClient) -> None:
+def test_the_resource_definition_is_installed(api_client: client.ApiClient, trustyai_module: dict | None) -> None:
+    skip_unless_served(api_client, trustyai_module)
     assert crd_exists(api_client, NEMO_CRD_NAME), f"{NEMO_CRD_NAME} is not installed; the operator installs it"
 
 
