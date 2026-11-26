@@ -54,6 +54,7 @@ markers = [
     "generation: checks for the collection generation API and the authorization the proxy applies to it",
     "emulator: checks for the LLM emulator and the token it requires",
     "benchmark: checks that submit an evaluation job and read its results",
+    "image_pull_grace: the image-pull grace case, which waits out the operator's ten-minute grace before the failure is reported (own section: too slow for the default run)",
     "lmeval: checks for an LMEvalJob: its execution Pod and the NetworkPolicy that guards it",
     "adapters: EvalHub adapters: one real benchmark per job, run as a section of their own",
     "atif: the ATIF adapter section: MLflow, generated trajectories and the manifest, provenance, unscored and version-range behaviour",

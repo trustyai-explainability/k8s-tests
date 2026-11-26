@@ -59,6 +59,7 @@ EVALHUB_TENANT_CONFIG_MAPS = (
     "evalhub-discovery",
 )
 EVALHUB_JOBS_PATH = "/api/v1/evaluations/jobs"
+EVALHUB_PROVIDERS_PATH = "/api/v1/evaluations/providers"
 # Terminal job states; anything else keeps polling.
 JOB_TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
 # kube-rbac-proxy authorizes the API with namespace-scoped SubjectAccessReviews
@@ -297,10 +298,11 @@ def request(
     timeout: int = 10,
     headers: dict[str, str] | None = None,
     json_body: Any | None = None,
+    params: dict[str, str] | None = None,
 ) -> requests.Response:
     """Send a request to EvalHub without verifying the certificate the tests minted."""
     LOGGER.info("%s %s", method.upper(), url)
-    return requests.request(method, url, headers=headers, json=json_body, verify=False, timeout=timeout)
+    return requests.request(method, url, headers=headers, json=json_body, params=params, verify=False, timeout=timeout)
 
 
 def instance_tls_cert(core_client: client.CoreV1Api, namespace: str, name: str = EVALHUB_NAME) -> bytes:
@@ -559,6 +561,53 @@ def wait_for_job(
             break
         time.sleep(interval)
     pytest.fail(f"job {job_id} did not reach a terminal state within {timeout}s (last: {last_state})", pytrace=False)
+
+
+def create_provider(
+    base_url: str, headers: dict[str, str], payload: dict[str, Any], timeout: int = 30
+) -> dict[str, Any]:
+    """Create a custom provider and return the resource the server created."""
+    response = request(
+        "post", f"{base_url}{EVALHUB_PROVIDERS_PATH}", timeout=timeout, headers=headers, json_body=payload
+    )
+    if response.status_code != 201:
+        pytest.fail(
+            f"POST {EVALHUB_PROVIDERS_PATH} answered {response.status_code}: {response.text[:1000]}",
+            pytrace=False,
+        )
+    provider = response.json()
+    LOGGER.info("provider %s created", (provider.get("resource") or {}).get("id"))
+    return provider
+
+
+def delete_provider(base_url: str, headers: dict[str, str], provider_id: str, timeout: int = 30) -> None:
+    """Delete a custom provider."""
+    response = request("delete", f"{base_url}{EVALHUB_PROVIDERS_PATH}/{provider_id}", timeout=timeout, headers=headers)
+    if response.status_code not in (200, 202, 204):
+        pytest.fail(
+            f"DELETE {EVALHUB_PROVIDERS_PATH}/{provider_id} answered {response.status_code}: {response.text[:1000]}",
+            pytrace=False,
+        )
+    LOGGER.info("provider %s deleted", provider_id)
+
+
+def delete_job(
+    base_url: str, headers: dict[str, str], job_id: str, *, hard_delete: bool = True, timeout: int = 30
+) -> None:
+    """Delete an evaluation job and, with `hard_delete`, its runtime resources."""
+    response = request(
+        "delete",
+        f"{base_url}{EVALHUB_JOBS_PATH}/{job_id}",
+        timeout=timeout,
+        headers=headers,
+        params={"hard_delete": "true"} if hard_delete else None,
+    )
+    if response.status_code not in (200, 202, 204):
+        pytest.fail(
+            f"DELETE {EVALHUB_JOBS_PATH}/{job_id} answered {response.status_code}: {response.text[:1000]}",
+            pytrace=False,
+        )
+    LOGGER.info("job %s deleted (hard_delete: %s)", job_id, hard_delete)
 
 
 def benchmark_result(job: dict[str, Any], benchmark_id: str) -> dict[str, Any]:
