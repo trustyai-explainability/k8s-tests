@@ -74,7 +74,13 @@ def section_marker(section: str, settings: Settings) -> str | None:
 
 
 def pytest_arguments(
-    settings: Settings, *, section: str, marker: str | None, select: tuple[str, ...], report: str | None
+    settings: Settings,
+    *,
+    section: str,
+    marker: str | None,
+    select: tuple[str, ...],
+    report: str | None,
+    chaos: bool = False,
 ) -> tuple[list[str], Path]:
     """The pytest command line for a selection, and the report it writes."""
     tokens = [token for value in select for token in shlex.split(value)]
@@ -84,7 +90,7 @@ def pytest_arguments(
         )
     # --select names its own selection, so the section marker would narrow it behind the
     # caller's back; an explicit --marker still applies.
-    expression = marker or (None if tokens else section_marker(section, settings))
+    expression = marker or (None if tokens or chaos else section_marker(section, settings))
     section_report = {
         "adapters": settings.adapters_report_file,
         "adapters-atif": settings.adapters_atif_report_file,
@@ -97,6 +103,8 @@ def pytest_arguments(
         arguments.append(str(root))
     if expression:
         arguments += ["-m", expression]
+    if chaos:
+        arguments.append("--chaos")
     arguments += shlex.split(settings.pytest_args)
     arguments += [f"--html={target}", "--self-contained-html"]
     # Named outright, so a pyproject.toml in the caller's directory cannot decide the
@@ -143,10 +151,13 @@ def run_tests(
     select: tuple[str, ...],
     report: str | None,
     keep_resources: bool,
+    chaos: bool = False,
 ) -> int:
     """Run the selection, leave the resources when asked, and say where the report went."""
     settings = settings_for_run(settings)
-    arguments, target = pytest_arguments(settings, section=section, marker=marker, select=select, report=report)
+    arguments, target = pytest_arguments(
+        settings, section=section, marker=marker, select=select, report=report, chaos=chaos
+    )
     settings.with_updates(keep_resources=keep_resources).export()
     result = run(arguments, check=False)
     click.echo(f"HTML report: {target.resolve()}")
