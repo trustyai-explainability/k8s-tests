@@ -79,6 +79,12 @@ def adapter_context(adapter: str) -> str:
 def selected_adapters(settings: Settings) -> list[str]:
     """The adapters ADAPTERS asks for, checked against the ones that exist."""
     wanted = settings.adapters.replace(",", " ").split() or ["all"]
+    # `none` builds no adapter at all, for a run whose checks need only the operators and
+    # the image it was given; it stands alone, because naming it beside others is a contradiction.
+    if "none" in wanted:
+        if wanted != ["none"]:
+            raise HarnessError("ADAPTERS=none stands alone; it cannot be combined with other adapters")
+        return []
     for item in wanted:
         if item not in ("all", "lmes") and item not in CONTRIB_ADAPTERS:
             raise HarnessError(

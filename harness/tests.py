@@ -32,6 +32,7 @@ SECTIONS = (
     "generation",
     "isvc-free",
     "lmeval",
+    "nemo",
     "tas-payload",
 )
 
@@ -70,6 +71,8 @@ def section_marker(section: str, settings: Settings) -> str | None:
             return "tas_payload"
         case "lmeval":
             return "lmeval"
+        case "nemo":
+            return "nemo"
     raise HarnessError(f"unknown section {section!r}; choose one of {', '.join(SECTIONS)}")
 
 

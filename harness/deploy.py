@@ -70,6 +70,7 @@ RELATED_IMAGES = (
     ("RELATED_IMAGE_ODH_EVAL_HUB_INSPECTAI_IMAGE", "inspect_img", "Inspect AI adapter"),
     ("RELATED_IMAGE_ODH_EVAL_HUB_LIGHTEVAL_IMAGE", "lighteval_img", "LightEval adapter"),
     ("RELATED_IMAGE_ODH_TRUSTYAI_GARAK_LLS_PROVIDER_DSP_IMAGE", "garak_img", "garak adapter"),
+    ("RELATED_IMAGE_ODH_TRUSTYAI_NEMO_GUARDRAILS_SERVER_IMAGE", "nemo_img", "NeMo Guardrails server"),
 )
 
 
@@ -233,6 +234,8 @@ def operand_images(settings: Settings) -> dict[str, str]:
         images["lmes-pod-image"] = settings.lmes_img
     if settings.garak_img:
         images["garak-provider-image"] = settings.garak_img
+    if settings.nemo_img:
+        images["nemo-guardrails-image"] = settings.nemo_img
     return images
 
 

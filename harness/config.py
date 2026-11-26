@@ -51,6 +51,7 @@ IMAGE_RECORD_VARS = (
     "WORKLOAD_IMG",
     "MODULE_IMG",
     "EVALHUB_IMG",
+    "NEMO_IMG",
     "LMES_IMG",
     "INSPECT_IMG",
     "LIGHTEVAL_IMG",
@@ -187,6 +188,19 @@ SETTINGS: tuple[Setting, ...] = (
         help="EvalHub operand image; empty keeps the operator's own pin",
     ),
     Setting(
+        field="nemo_img",
+        envvar="NEMO_IMG",
+        default="",
+        help="NeMo Guardrails server operand image; empty keeps the operator's own pin",
+    ),
+    Setting(
+        field="nemo_repo",
+        envvar="NEMO_REPO",
+        default="",
+        kind="dir",
+        help="NeMo-Guardrails checkout images-all builds the server image from; empty builds none",
+    ),
+    Setting(
         field="trustyai_service_img",
         envvar="TRUSTYAI_SERVICE_IMG",
         default=DEFAULT_TRUSTYAI_SERVICE_IMG,
@@ -314,7 +328,7 @@ SETTINGS: tuple[Setting, ...] = (
         field="adapters",
         envvar="ADAPTERS",
         default="all",
-        help="adapters images-all builds: all, lmes, or a comma-separated list of eval-hub-contrib directories",
+        help="adapters images-all builds: all, lmes, none, or a comma-separated list of eval-hub-contrib directories",
     ),
     Setting(
         field="platform",
@@ -380,6 +394,7 @@ class Settings:
     workload_img: str = ""
     module_img: str = ""
     evalhub_img: str = ""
+    nemo_img: str = ""
     trustyai_service_img: str = DEFAULT_TRUSTYAI_SERVICE_IMG
     kube_rbac_proxy_img: str = ""
     lmes_img: str = ""
@@ -403,6 +418,7 @@ class Settings:
     registry_port: str = DEFAULT_REGISTRY_PORT
     evalhub_repo: str = ""
     evalhub_contrib_repo: str = ""
+    nemo_repo: str = ""
     lmes_repo: str = ""
     adapters: str = "all"
     platform: str = ""

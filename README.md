@@ -279,6 +279,7 @@ Every one is a flag and an environment variable; `k8s-tests --help` lists them a
 | `ATIF_IMG` | *(empty)* | ATIF adapter image the adapters-atif section points EvalHub's provider at; empty keeps the operator's pin |
 | `MLFLOW_IMG` | *(empty)* | MLflow tracking server the adapters-atif section deploys; empty uses `ghcr.io/mlflow/mlflow:v3.1.0` |
 | `EVALHUB_IMG` | *(empty)* | EvalHub operand image; empty keeps the operator's own pin (`quay.io/evalhub/evalhub:latest`) |
+| `NEMO_IMG` | *(empty)* | NeMo Guardrails server operand image, passed through `RELATED_IMAGE_ODH_TRUSTYAI_NEMO_GUARDRAILS_SERVER_IMAGE`; empty keeps the operator's own pin |
 | `TRUSTYAI_SERVICE_IMG` | `quay.io/trustyai/trustyai-service:latest` | TrustyAI service operand image, passed through `RELATED_IMAGE_ODH_TRUSTYAI_SERVICE_PY_IMAGE`; set it to a build under test |
 | `KUBE_RBAC_PROXY_IMG` | *(empty)* | kube-rbac-proxy sidecar image, passed through `RELATED_IMAGE_ODH_KUBE_RBAC_PROXY_IMAGE`; set it to an arm64 build of `opendatahub-io/kube-rbac-proxy` on Apple Silicon (see Troubleshooting) |
 | `TAG` | `dev` | Tag used by both image references |
@@ -286,8 +287,9 @@ Every one is a flag and an environment variable; `k8s-tests --help` lists them a
 | `REGISTRY_PORT` | `5005` | Host port of the registry `images-all` starts on the `kind` network |
 | `EVALHUB_REPO` | `../eval-hub` | Checkout `images-all` builds the EvalHub service image from |
 | `EVALHUB_CONTRIB_REPO` | `../eval-hub-contrib` | Checkout `images-all` builds the adapter images from |
+| `NEMO_REPO` | *(empty)* | NeMo-Guardrails checkout the server image is built from (its `Dockerfile`) by `up` (tagged `NEMO_IMG`) and by `images-all`; empty builds none |
 | `LMES_REPO` | `../lm-evaluation-harness` | Checkout `images-all` builds `community-lmes` from (`Dockerfile.lmes-job`) |
-| `ADAPTERS` | `all` | `all`, `lmes`, or a comma-separated list of eval-hub-contrib adapter directories |
+| `ADAPTERS` | `all` | `all`, `lmes`, `none`, or a comma-separated list of eval-hub-contrib adapter directories; `none` builds no adapter and stands alone |
 | `LMES_IMG` / `INSPECT_IMG` / `LIGHTEVAL_IMG` | *(empty)* | Adapter image overrides passed through the module operator (`RELATED_IMAGE_ODH_*`) |
 | `GARAK_IMG` | *(empty)* | garak adapter image, passed through `RELATED_IMAGE_ODH_TRUSTYAI_GARAK_LLS_PROVIDER_DSP_IMAGE` (`garak-provider-image` on a pre-module operator). Set it to test a build of the adapter, for example one loaded with `kind load image-archive`. Operators before trustyai-explainability/trustyai-service-operator#1145 (3.5 included) pin an image that needs credentials to pull, so garak's adapters run needs this set against them |
 | `PLATFORM` | engine host platform | Platform the images are built for (`linux/arm64` on Apple Silicon) |
@@ -795,6 +797,37 @@ repair path reacts to.
 ```sh
 k8s-tests test --section lmeval    # only this section
 ```
+
+## NeMo Guardrails server
+
+`tests/nemo/test_nemo_guardrails.py` is the `nemo` section. It creates a `NemoGuardrails`
+resource with one configuration, in a namespace of its own, and checks what the workload
+operator promises for it:
+
+- the Deployment runs the server image the run was given (`NEMO_IMG`, when the run has one);
+- the configuration is mounted at `/app/config/nemo`, the directory the server reads (the name the operator's server image starts with);
+- the server lists that configuration on `GET /v1/rails/configs`.
+
+The last two are separate checks, so a failure says which side of the contract broke: a
+missing mount is the operator, and a mount the server does not list is the image.
+
+`NEMO_REPO` builds the server image from a NeMo-Guardrails checkout's `Dockerfile`, and it
+is opt-in because that build is large. Without it, the operator's own pin runs. `NEMO_IMG`
+names the image: `up` builds it under that name and loads it onto the Kind nodes, so the
+deploy runs exactly what was built. No registry is needed for this. The operator's NeMo
+Deployment sets no pull policy, and a `dev` tag defaults to `IfNotPresent`, so the loaded
+image is the one the node runs.
+
+```sh
+NEMO_REPO=../NeMo-Guardrails NEMO_IMG=localhost/nemo-guardrails-server:dev k8s-tests up
+NEMO_IMG=localhost/nemo-guardrails-server:dev k8s-tests test --section nemo   # only this section
+```
+
+`images-all` (and `up-registry`) also build the server from `NEMO_REPO` and push it to the
+local registry, for a run that deploys from the registry instead.
+
+The section carries the `nemo` marker and is part of the default run, as the EvalHub
+sections are.
 
 ## TrustyAI service
 

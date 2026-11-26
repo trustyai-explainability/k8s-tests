@@ -63,6 +63,7 @@ markers = [
     "tas_payload: checks that the TrustyAIService operator writes payload capture into a KServe InferenceService, with the API installed",
     "workload: checks for the TrustyAI workload (service) operator",
     "service: checks for the TrustyAIService resource, its operand and the API behind it",
+    "nemo: checks for the NeMo Guardrails server the workload operator deploys from a NemoGuardrails resource",
     "release: the operator releases a check applies to, from --release",
 ]
 addopts = [
