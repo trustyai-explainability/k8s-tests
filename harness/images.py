@@ -56,6 +56,7 @@ NAMED_IMAGE_FIELDS = {
     "trustyai_service_img": "TrustyAI service",
     "kube_rbac_proxy_img": "kube-rbac-proxy",
     "lmes_img": "lm_evaluation_harness adapter",
+    "nemo_img": "NeMo Guardrails server",
     "mlflow_img": "MLflow tracking server",
     "emulator_img": "LLM emulator",
 }
@@ -254,6 +255,15 @@ def build_load_path_images(settings: Settings) -> None:
     build_operators(settings)
     for adapter, image in loadable_adapter_images(settings):
         build_adapter(settings, adapter, image)
+    if settings.nemo_repo:
+        # The load path has no registry, so the server image is built under the name the
+        # deploy hands the operator, and `load` puts that same image on the node.
+        if not settings.nemo_img:
+            raise HarnessError(
+                "NEMO_REPO is set but NEMO_IMG is not: name the server image to build, for example "
+                "NEMO_IMG=localhost/nemo-guardrails-server:dev, so the deploy uses the image that is loaded"
+            )
+        build_nemo(settings, settings.nemo_img)
 
 
 def load(settings: Settings) -> None:
@@ -346,6 +356,25 @@ def build_evalhub(settings: Settings, image: str) -> None:
     build(settings, image, repo, containerfile, *args)
 
 
+#: The file the operator's NeMo Guardrails server image is built from. The checkout's plain
+#: `Dockerfile` is the upstream library's image, which serves `/config` and starts a different
+#: entrypoint, so the operator's `/app/config/<name>` contract is not there.
+NEMO_CONTAINERFILE = "Dockerfile.server"
+
+
+def build_nemo(settings: Settings, image: str) -> None:
+    """Build the server image the operator deploys, from NEMO_REPO's `Dockerfile.server`."""
+    repo = require_checkout(settings.nemo_repo, "NEMO_REPO")
+    containerfile = repo / NEMO_CONTAINERFILE
+    if not containerfile.is_file():
+        raise HarnessError(
+            f"missing {containerfile}: NEMO_REPO must be a checkout that has {NEMO_CONTAINERFILE}, the "
+            "image the operator deploys. The upstream NVIDIA Dockerfile serves a different config root and "
+            "would not satisfy the operator's contract."
+        )
+    build(settings, image, repo, containerfile)
+
+
 def build_adapter(settings: Settings, adapter: str, image: str) -> None:
     """Build one eval-hub-contrib adapter image, with the arguments its Containerfile takes."""
     repo = require_checkout(settings.evalhub_contrib_repo, "EVALHUB_CONTRIB_REPO")
@@ -383,6 +412,17 @@ def images_all(settings: Settings) -> None:
     """Build every source image, push it to the local registry, and record the references."""
     require_cluster(settings)
     require_operator_repo(settings)
+    if settings.nemo_repo:
+        require_checkout(settings.nemo_repo, "NEMO_REPO")
+        if "nemo_img" in settings.explicit:
+            # images-all pushes the server under its own registry reference and records that. A
+            # NEMO_IMG named here would be deployed in its place while nothing built it, so the
+            # pairing is refused before anything is built. `up` is the route that builds under NEMO_IMG.
+            raise HarnessError(
+                "NEMO_IMG cannot be named with NEMO_REPO under images-all: it builds the server and pushes it "
+                "to the local registry under its own reference. Drop NEMO_IMG, or use 'k8s-tests up', which "
+                "builds under the name it is given."
+            )
     if settings.skip_build and settings.remove_after_push:
         raise HarnessError(
             "SKIP_BUILD reuses the images in the local store, so it cannot be combined with REMOVE_AFTER_PUSH"
@@ -418,6 +458,17 @@ def images_all(settings: Settings) -> None:
     push_and_maybe_remove(settings, evalhub)
     built.append(evalhub)
     recorded["EVALHUB_IMG"] = evalhub
+
+    # Opt-in: the NeMo server is a large build, so only a run that names its checkout makes it.
+    if settings.nemo_repo:
+        nemo = registry.registry_reference(settings, "nemo-guardrails-server")
+        if settings.skip_build:
+            require_present(settings, (nemo,))
+        else:
+            build_nemo(settings, nemo)
+        push_and_maybe_remove(settings, nemo)
+        built.append(nemo)
+        recorded["NEMO_IMG"] = nemo
 
     for adapter in registry.selected_adapters(settings):
         image = registry.registry_reference(settings, f"evalhub/{registry.adapter_image_name(adapter)}")
@@ -465,6 +516,7 @@ def write_record(settings: Settings, recorded: dict[str, str]) -> None:
         "WORKLOAD_IMG",
         "MODULE_IMG",
         "EVALHUB_IMG",
+        "NEMO_IMG",
         "LMES_IMG",
         "INSPECT_IMG",
         "LIGHTEVAL_IMG",

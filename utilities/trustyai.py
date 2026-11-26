@@ -39,6 +39,7 @@ IMAGE_ENV_VARS = (
     "WORKLOAD_IMG",
     "MODULE_IMG",
     "EVALHUB_IMG",
+    "NEMO_IMG",
     "LMES_IMG",
     "INSPECT_IMG",
     "LIGHTEVAL_IMG",

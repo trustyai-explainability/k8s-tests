@@ -70,6 +70,7 @@ RELATED_IMAGES = (
     ("RELATED_IMAGE_ODH_EVAL_HUB_INSPECTAI_IMAGE", "inspect_img", "Inspect AI adapter"),
     ("RELATED_IMAGE_ODH_EVAL_HUB_LIGHTEVAL_IMAGE", "lighteval_img", "LightEval adapter"),
     ("RELATED_IMAGE_ODH_TRUSTYAI_GARAK_LLS_PROVIDER_DSP_IMAGE", "garak_img", "garak adapter"),
+    ("RELATED_IMAGE_ODH_TRUSTYAI_NEMO_GUARDRAILS_SERVER_IMAGE", "nemo_img", "NeMo Guardrails server"),
 )
 
 
@@ -233,6 +234,8 @@ def operand_images(settings: Settings) -> dict[str, str]:
         images["lmes-pod-image"] = settings.lmes_img
     if settings.garak_img:
         images["garak-provider-image"] = settings.garak_img
+    if settings.nemo_img:
+        images["nemo-guardrails-image"] = settings.nemo_img
     return images
 
 
@@ -517,6 +520,15 @@ def registry_deploy(settings: Settings) -> None:
     if not path.exists():
         raise HarnessError(f"{path} is missing; run 'k8s-tests images-all' first")
     recorded = record_values(path)
+    built_nemo = recorded.get("NEMO_IMG", "")
+    if built_nemo and "nemo_img" in settings.explicit and settings.nemo_img != built_nemo:
+        # The record names the server images-all built and pushed; a different NEMO_IMG named here
+        # would be deployed while the section checked it against itself, so it is refused.
+        raise HarnessError(
+            f"NEMO_IMG={settings.nemo_img} differs from the server images-all built ({built_nemo}); "
+            "drop NEMO_IMG to deploy the built server, or rerun images-all without NEMO_REPO to use "
+            "an image you pushed yourself"
+        )
     if is_deployed_record(path):
         info(f"{path} already describes a deployment; reusing its references")
     deploy(settings.with_image_record(recorded))
