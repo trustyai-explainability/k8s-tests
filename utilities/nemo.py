@@ -51,17 +51,26 @@ DEPLOYMENT_TIMEOUT = 900
 DEPLOYMENT_POLL_SECONDS = 5
 
 
-def skip_unless_served(api_client: client.ApiClient, trustyai_module: dict[str, Any] | None) -> None:
-    """Skip when this install does not run a NeMo Guardrails server, so the checks are not applicable.
+def skip_unless_enabled(trustyai_module: dict[str, Any] | None) -> None:
+    """Skip when the module resource leaves nemoGuardrails off, so nothing reconciles a NemoGuardrails.
 
-    Used by the fixture and the checks alike, so an install that has the CRD but leaves the service
-    off is recorded as not applicable rather than as a failure of the section.
+    An install that leaves the service off may never install the CRD, so the CRD check uses only this.
     """
-    if not crd_exists(api_client, NEMO_CRD_NAME):
-        pytest.skip(f"{NEMO_CRD_NAME} is not installed, so this install serves no NeMo Guardrails server")
     enabled = ((trustyai_module or {}).get("spec") or {}).get("enabledServices") or {}
     if enabled and not enabled.get("nemoGuardrails", True):
         pytest.skip("the module resource does not enable nemoGuardrails, so no NemoGuardrails is reconciled")
+
+
+def skip_unless_served(api_client: client.ApiClient, trustyai_module: dict[str, Any] | None) -> None:
+    """Skip when this install does not run a NeMo Guardrails server, so the checks are not applicable.
+
+    Used by the fixture, so an install that has the CRD but leaves the service off is recorded as not
+    applicable rather than as a failure of the section. A missing CRD on an enabled install is left to
+    the CRD check to report.
+    """
+    if not crd_exists(api_client, NEMO_CRD_NAME):
+        pytest.skip(f"{NEMO_CRD_NAME} is not installed, so this install serves no NeMo Guardrails server")
+    skip_unless_enabled(trustyai_module)
 
 
 def nemo_config_map(namespace: str) -> client.V1ConfigMap:

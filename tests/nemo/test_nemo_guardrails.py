@@ -29,6 +29,7 @@ from utilities.nemo import (
     delete_nemo,
     served_configurations,
     server_container,
+    skip_unless_enabled,
     skip_unless_served,
     wait_for_nemo_deployment,
 )
@@ -81,7 +82,7 @@ def nemo_namespace(
 
 
 def test_the_resource_definition_is_installed(api_client: client.ApiClient, trustyai_module: dict | None) -> None:
-    skip_unless_served(api_client, trustyai_module)
+    skip_unless_enabled(trustyai_module)
     assert crd_exists(api_client, NEMO_CRD_NAME), f"{NEMO_CRD_NAME} is not installed; the operator installs it"
 
 
