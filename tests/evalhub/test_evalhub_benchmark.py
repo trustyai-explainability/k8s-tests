@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from typing import Any
 
 import pytest
+import yaml
+from kubernetes import client
 
 from utilities.emulator import auth_state
-from utilities.evalhub import api_headers, benchmark_result, submit_job, wait_for_job
+from utilities.evalhub import EVALHUB_NAME, api_headers, benchmark_result, read_job, submit_job, wait_for_job
 from utilities.model import ModelEndpoint
 
 LOGGER = logging.getLogger(__name__)
@@ -93,6 +96,45 @@ def test_the_job_is_accepted_with_the_requested_benchmark(submitted: dict[str, A
     benchmark = job["benchmarks"][0]
     assert (benchmark["id"], benchmark["provider_id"]) == (BENCHMARK_ID, PROVIDER_ID)
     assert benchmark["parameters"]["num_examples"] == NUM_EXAMPLES
+
+
+def test_the_job_uses_the_injected_sidecar_image(
+    apps_client: client.AppsV1Api,
+    core_client: client.CoreV1Api,
+    evalhub_api_base: str,
+    evalhub_instance_namespace: str,
+    evalhub_tenant_namespace: str,
+    submitted: dict[str, Any],
+) -> None:
+    """The benchmark Job must use the image injected in the running EvalHub's config."""
+    deployment = apps_client.read_namespaced_deployment(EVALHUB_NAME, evalhub_instance_namespace)
+    config_volume = next(volume for volume in deployment.spec.template.spec.volumes if volume.name == "evalhub-config")
+    config_map = core_client.read_namespaced_config_map(config_volume.config_map.name, evalhub_instance_namespace)
+    service_config = yaml.safe_load(config_map.data["config.yaml"])
+    expected = service_config.get("sidecar", {}).get("sidecar_container", {}).get("image", "").strip()
+    assert expected and expected != "eval-runtime-sidecar:latest", "operator did not inject a sidecar image"
+
+    job_id = submitted["job"]["resource"]["id"]
+    jobs_api = client.BatchV1Api(core_client.api_client)
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        jobs = jobs_api.list_namespaced_job(evalhub_tenant_namespace, label_selector=f"job_id={job_id}").items
+        if jobs:
+            for job in jobs:
+                pod_spec = job.spec.template.spec
+                sidecars = [
+                    container.image
+                    for container in (pod_spec.init_containers or []) + (pod_spec.containers or [])
+                    if container.name == "sidecar"
+                ]
+                assert sidecars == [expected], f"{job.metadata.name}: expected sidecar {expected!r}, got {sidecars}"
+            return
+        status = read_job(evalhub_api_base, submitted["headers"], job_id)["status"]
+        assert status["state"] not in ("failed", "cancelled"), (
+            f"evaluation {job_id} ended before Job creation: {status}"
+        )
+        time.sleep(2)
+    pytest.fail(f"evaluation {job_id} did not create a Kubernetes Job in {evalhub_tenant_namespace}")
 
 
 def test_the_job_completes(finished: dict[str, Any]) -> None:
