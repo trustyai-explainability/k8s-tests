@@ -12,6 +12,7 @@ import logging
 import os
 import shutil
 import tempfile
+from importlib.util import find_spec
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,7 @@ _TEMP_DIRS: list[Path] = []
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption("--chaos", action="store_true", help="run only the opt-in operator pod deletion checks")
     parser.addoption(
         "--keep-resources",
         action="store_true",
@@ -54,7 +56,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """`--keep-resources` and KEEP_RESOURCES=1 do the same thing, so the fixtures check one place."""
+    """Validate options and expose settings that fixtures read from the environment."""
+    if config.getoption("chaos") and find_spec("hypothesis") is None:
+        raise pytest.UsageError(
+            "--chaos requires Hypothesis in the Python environment running pytest. "
+            "From this checkout, run 'uv sync' and 'uv run k8s-tests test --chaos', "
+            "or refresh the standalone CLI with 'uv tool install --force .'."
+        )
     if config.getoption("keep_resources"):
         os.environ[KEEP_RESOURCES_VAR] = "1"
     # The flag and the environment variable are one declaration: the harness exports
@@ -239,6 +247,7 @@ SCOPE_TITLES = {
     "evalhub": "EvalHub",
     "emulator": "LLM emulator",
     "lmeval": "LMEvalJob",
+    "chaos": "Operator chaos",
     "module": "Module operator",
     "service": "TrustyAI service",
     "workload": "Workload operator",
@@ -257,8 +266,13 @@ def _scope_of(item: pytest.Item) -> str:
     return SCOPE_UNMARKED
 
 
-def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """Order the run by scope so the report groups the tests by component, and apply the version gates."""
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Gate chaos checks, group the report by component, and apply the version gates."""
+    chaos = config.getoption("chaos")
+    deselected = [item for item in items if bool(item.get_closest_marker("chaos")) != chaos]
+    if deselected:
+        items[:] = [item for item in items if bool(item.get_closest_marker("chaos")) == chaos]
+        config.hook.pytest_deselected(items=deselected)
     _skip_outside_declared_releases(items)
     order = {scope: index for index, scope in enumerate((*SCOPE_MARKERS, SCOPE_UNMARKED))}
     for item in items:

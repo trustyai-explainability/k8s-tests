@@ -519,20 +519,23 @@ def wait_for_workload_operator(
     apps_client: client.AppsV1Api,
     namespace: str,
     timeout: int = STACK_TIMEOUT,
+    *,
+    replaced_uid: str | None = None,
 ) -> client.V1Deployment:
-    """Poll until the module operator has deployed the workload operator."""
+    """Poll for the workload operator, optionally requiring a replacement Deployment."""
     LOGGER.info("waiting for the module operator to deploy %s/%s", namespace, WORKLOAD_OPERATOR_DEPLOYMENT)
     deadline = time.monotonic() + timeout
     while True:
         deployment = _read_deployment_or_none(apps_client, WORKLOAD_OPERATOR_DEPLOYMENT, namespace)
-        if deployment is not None:
+        if deployment is not None and (replaced_uid is None or deployment.metadata.uid != replaced_uid):
             LOGGER.info("%s/%s exists", namespace, WORKLOAD_OPERATOR_DEPLOYMENT)
             return deployment
         if time.monotonic() >= deadline:
             break
         time.sleep(STACK_INTERVAL)
     pytest.fail(
-        f"the module operator did not create deployment {namespace}/{WORKLOAD_OPERATOR_DEPLOYMENT} within {timeout}s; "
+        f"the module operator did not {'replace' if replaced_uid else 'create'} deployment "
+        f"{namespace}/{WORKLOAD_OPERATOR_DEPLOYMENT} within {timeout}s; "
         f"check the {MODULE_OPERATOR_DEPLOYMENT} logs and the {MODULE_KIND}/{MODULE_CR_NAME} conditions",
         pytrace=False,
     )

@@ -252,6 +252,7 @@ def logs(settings: Settings) -> None:
     help="a pytest selection, shell-split, for example '-m generation' or tests/evalhub",
 )
 @click.option("--report", metavar="PATH", help="HTML report to write; defaults per section")
+@click.option("--chaos", is_flag=True, help="run only the opt-in operator pod deletion checks")
 @click.option(
     "--keep-resources/--no-keep-resources",
     default=False,
@@ -267,6 +268,7 @@ def test(
     select: tuple[str, ...],
     report: str | None,
     keep_resources: bool,
+    chaos: bool,
 ) -> None:
     """Run the checks, and write an HTML report.
 
@@ -275,7 +277,13 @@ def test(
     """
     sys.exit(
         test_ops.run_tests(
-            settings, section=section, marker=marker, select=select, report=report, keep_resources=keep_resources
+            settings,
+            section=section,
+            marker=marker,
+            select=select,
+            report=report,
+            keep_resources=keep_resources,
+            chaos=chaos,
         )
     )
 

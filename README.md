@@ -987,7 +987,7 @@ k8s-tests test --section adapters                           # just the adapter j
 k8s-tests test --section lmeval                             # just the LMEvalJob checks
 k8s-tests test --section isvc-free                          # just the no-serving-API install
 k8s-tests test --section tas-payload                        # the payload capture on an installed API
-k8s-tests test --section all                                # everything, adapters included
+k8s-tests test --section all                                # everything except opt-in chaos, adapters included
 ```
 
 Anything else goes through `--select`, which takes a marker expression, a directory,
@@ -1038,6 +1038,47 @@ certificate only covers the in-cluster Service names.
 k8s-tests test --pytest-args "-v"                          # extra pytest flags
 k8s-tests test --kube-context my-cluster --namespace opendatahub   # another cluster
 ```
+
+### Operator chaos tests
+
+Run these only on a disposable test cluster with TrustyAI already deployed. The test
+intentionally interrupts the single-replica operator it targets. Run it serially, not
+alongside other cluster tests.
+
+```sh
+uv sync
+uv run k8s-tests test --chaos --kube-context kind-trustyai --namespace opendatahub
+# Or, with the context and namespace set in the environment:
+uv run pytest --chaos
+```
+
+If a previously installed `k8s-tests` command cannot import Hypothesis, use
+`uv run k8s-tests` from this checkout as shown above, or refresh the standalone
+installation with `uv tool install --force .` from the repository root.
+
+`--chaos` runs only `tests/chaos/`. Without the flag, those checks are deselected even
+with `--section all` or an explicit path. Use `--chaos -k workload-operator` with pytest
+(or `--chaos --select '-k workload-operator'` with the harness) to target one operator.
+
+Hypothesis generates short sequences of one to three Pod deletions for each operator:
+the workload operator and, on modular installs, the module operator. The Kubernetes
+client verifies Pod ownership through the ReplicaSet, deletes exactly that Pod by UID,
+and waits for the same Deployment to recover with a new, Ready Pod before the next
+deletion. These Pod-only checks leave Deployments intact.
+
+Two additional cases are inspired by [Sieve's intermediate-state testing pattern](https://github.com/sieve-project/sieve/blob/763cd38/README.md#testing-approaches).
+On an existing **Managed** modular install, they delete the workload operator Deployment
+by UID, first with the module operator running and then immediately after requesting
+deletion of its Pod. Both require the module operator to recreate the workload
+Deployment with a new UID, the same images and replica count, and healthy Pods.
+The overlapping-fault case uses Kubernetes APIs, not Sieve instrumentation: it does
+not guarantee interruption at a particular point in reconciliation or that an event
+was missed. Run just these cases with `--chaos --select tests/chaos/test_module_reconciliation.py`.
+
+Chaos does not directly modify user workloads or custom resources. The test identity
+needs read access to Deployments and ReplicaSets and permission to list and delete Pods
+in the operator namespace. The additional scenarios also require read access to the
+TrustyAI module API and permission to delete the workload operator Deployment.
 
 ### Keeping the resources
 
